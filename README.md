@@ -26,11 +26,23 @@ implementation reproduces. Our measurements, including two refinements found
 during reimplementation and several confirmed negative results, are in
 [BENCHMARKS.md](BENCHMARKS.md).
 
+The repository also implements **IPT** (Iterative Perturbation Theory), a
+one-gemm-per-iteration fixed point for near-diagonal input, and the
+**SSJ→IPT hybrid** that uses SSJ's global basin to feed IPT's cheap endgame.
+On strongly diagonally dominant matrices IPT **beats LAPACK `dsyevd` by
+1.4–1.9×** at full accuracy — see [BENCHMARKS.md](BENCHMARKS.md).
+
 ## Usage
 
 ```python
 import numpy as np
-from ssj import ssj_eigh
+from ssj import ssj_eigh, ipt_eigh, ssj_ipt_eigh
+
+# near-diagonal input: IPT converges in a handful of gemms, beating LAPACK
+w, V = ipt_eigh(A_near_diagonal)
+
+# any symmetric input: SSJ globalizes, IPT finishes cheaply
+w, V = ssj_ipt_eigh(A)
 
 A = np.random.randn(500, 500); A = (A + A.T) / 2
 

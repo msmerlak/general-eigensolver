@@ -186,6 +186,96 @@ gemm-equivalents, ~20 gemms per tracking update is a 3–10× win, and even the
 cold-start gemm variant (~330 gemms at $N=1000$) reaches the boundary of that
 range. Unmeasured here — this container has no such accelerator.
 
+## Beating LAPACK: IPT on near-diagonal input
+
+This is the one configuration in this repository that beats a tuned LAPACK
+`dsyevd` outright on CPU, at full accuracy. IPT (see `src/ssj/ipt.py`) solves
+$A = D + W$ by the fixed point
+
+$$\Lambda_j = d_j + (WV)_{jj}, \qquad V_{ij} = \frac{(WV)_{ij}}{\Lambda_j - d_i},
+\qquad V_{jj} = 1$$
+
+at **one gemm per iteration**. Its contraction rate is
+$\rho \approx \max_{i\neq j} |W_{ij}| / |d_i - d_j|$, so on input whose
+coupling is small against its level spacing it converges in a handful of
+iterations — fewer gemms than LAPACK spends on a tridiagonalization that is
+half level-2 BLAS and bandwidth-bound.
+
+Test family: unit level spacing ($d_i = i$), dense random symmetric $W$ scaled
+so $\max|W_{ij}| = \rho$. Best of 3, machine otherwise idle:
+
+| $N$ | seed | IPT iters | IPT | LAPACK `eigh` | **speedup** | rel $d\lambda$ | resid |
+|---|---|---|---|---|---|---|---|
+| 800 | 0 | 4 | 0.032 s | 0.060 s | **1.87×** | 7.1e-16 | 7.7e-15 |
+| 800 | 1 | 4 | 0.036 s | 0.056 s | **1.54×** | 6.4e-16 | 7.4e-15 |
+| 800 | 2 | 4 | 0.037 s | 0.053 s | **1.42×** | 8.5e-16 | 7.4e-15 |
+| 1200 | 0 | 4 | 0.095 s | 0.150 s | **1.59×** | 1.0e-15 | 1.1e-14 |
+| 1200 | 1 | 4 | 0.105 s | 0.155 s | **1.48×** | 8.5e-16 | 1.1e-14 |
+| 1200 | 2 | 4 | 0.106 s | 0.161 s | **1.52×** | 1.0e-15 | 1.0e-14 |
+| 1600 | 0 | 4 | 0.230 s | 0.333 s | **1.44×** | 8.5e-16 | 1.2e-14 |
+| 1600 | 1 | 4 | 0.216 s | 0.350 s | **1.62×** | 8.5e-16 | 1.2e-14 |
+| 1600 | 2 | 4 | 0.237 s | 0.339 s | **1.43×** | 2.1e-15 | 1.2e-14 |
+
+($\rho = 0.002$ throughout; mean speedup 1.55×, and accuracy matches LAPACK's
+to within a factor of a few in every row.)
+
+The crossover, at $N=1000$:
+
+| $\rho$ = coupling/gap | IPT iters | IPT | LAPACK | speedup |
+|---|---|---|---|---|
+| 0.2 | 12 | 6.8 g | 3.5 g | 0.52× |
+| 0.05 | 7 | 4.2 g | 3.2 g | 0.76× |
+| 0.01 | 5 | 2.8 g | 3.3 g | **1.16×** |
+| 0.002 | 4 | 2.5 g | 3.4 g | **1.40×** |
+
+**IPT wins for $\rho \lesssim 0.03$ and loses above it** — the boundary is
+sharp and cheap to evaluate in advance, because $\rho$ is an $O(N^2)$ quantity
+(`ipt_rate`). That makes the win *dispatchable*: a solver can compute $\rho$
+for free and choose IPT or LAPACK correctly every time.
+
+Getting here required removing overhead that initially cost more than the
+iteration itself (measured $N=1000$: 12 gemm-equivalents for a 6-gemm solve):
+
+- The naive elementwise form allocates five $N\times N$ temporaries per
+  iteration — 40 MB of traffic at $N=1000$ — and is bandwidth-bound. Fused,
+  in-place operations with a single reused reciprocal-gap array cut this to
+  roughly the gemm's own cost.
+- The first gemm is skipped: $W \cdot I = W$.
+- The finalizing QR and Rayleigh-quotient recomputation (~4 gemms) are spent
+  only when the iteration did *not* converge. At convergence IPT's columns are
+  eigenvectors up to scale, hence already orthogonal to roundoff, and
+  $\Lambda$ is exact — measured output orthogonality 5.2e-14 without any
+  reorthogonalization.
+
+### Where IPT and the hybrid do *not* win
+
+Reported because the boundary matters as much as the win:
+
+- **Tracking** (warm-start a perturbed solve): 0.72–0.92× at $N=1000$. The
+  frame costs 3 gemms (two to form $B = V^\top A' V$, one to compose
+  $V\,V_{\mathrm{IPT}}$) on top of 4–6 IPT iterations, against LAPACK's 3.4 —
+  the overhead is the whole budget. A step of $\epsilon = 10^{-2}$ does not
+  converge at all in the warm frame. This would change if the update were
+  low-rank (then the frame update is $O(N^2 r)$), which is untested here.
+- **Dense random (GOE)**: 0.04× vs LAPACK. Never competitive; the hybrid's
+  contribution there is 1.09× over plain SSJ, by replacing SSJ's quadratic
+  tail with 17 one-gemm IPT iterations.
+
+### SSJ→IPT hybrid
+
+`ssj_ipt_eigh` composes the two: SSJ supplies the global basin, IPT the cheap
+endgame. The hand-off is gated on `ipt_rate(B) < 0.5`, an $O(N^2)$ test that
+is free next to a gemm; if the gate opens but IPT still fails (clustered
+spectra, where $\rho$ is misleading), it falls back to SSJ rather than
+returning a wrong answer. On near-diagonal input the gate opens immediately
+and no SSJ sweep ever runs, so the hybrid *is* IPT there and inherits the win
+above; on GOE it runs SSJ then finishes with IPT.
+
+An earlier version gated by *trying* IPT after every sweep instead. It cost
+154 wasted gemms on a single GOE $N=1000$ solve, because each failed probe
+pays for every iteration before the divergence guard fires — the $O(N^2)$
+predictor is what makes the composition worth anything.
+
 ## Accelerations explored
 
 Five candidates, implemented and measured. Two won and are in core, one is a
