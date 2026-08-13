@@ -72,12 +72,6 @@ def test_symmetric_case():
     assert np.min(np.abs(exact - lam.real)) / np.linalg.norm(A, 2) < 1e-11
 
 
-if __name__ == "__main__":
-    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
-    for fn in fns:
-        fn()
-        print(f"ok  {fn.__name__}")
-    print(f"\n{len(fns)} tests passed")
 
 
 def test_adaptive_stays_cheap_when_the_problem_is_easy():
@@ -124,3 +118,11 @@ def test_adaptive_capped_block_fails_fast_rather_than_grinding():
     lam, v, info = adaptive_block_ipt_eig(A, 150, max_block=8, max_outer=40,
                                           return_info=True)
     assert not info["converged"] and info["block"] <= 8
+
+
+if __name__ == "__main__":
+    fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
+    for fn in fns:
+        fn()
+        print(f"ok  {fn.__name__}")
+    print(f"\n{len(fns)} tests passed")
