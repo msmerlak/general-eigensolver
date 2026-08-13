@@ -1137,3 +1137,60 @@ further rather than recover it. The corrected conclusion: purification's
 specific fixed-point structure (superattracting away from its one repelling
 point) gives predictable, reliable convergence that a moderate-degree
 polynomial filter does not match without cost approaching or exceeding it.
+
+
+## Last check: does a better STARTING vector fix strong-coupling divergence?
+
+One more test of the extremal-target divergence found above, because it has
+an obvious-looking fix. Seed Davidson's initial subspace with a few Lanczos
+vectors (which need no diagonal anchor at all) instead of just $e_j$ — if the
+problem were merely a bad starting guess, a handful of Krylov directions
+should rescue it.
+
+$N=400$, extremal target, seed dimension 1/4/8:
+
+| coupling | seed=1 | seed=4 | seed=8 |
+|---|---|---|---|
+| 8 | 72 its | 70 its | 69 its |
+| 30 | diverges | diverges | diverges |
+| 100, 300 | diverges | diverges | diverges |
+
+No rescue at any seed size. This sharpens the diagnosis rather than just
+repeating it: the failure is not the *starting point*, it is that Davidson's
+diagonal preconditioner $K = \mathrm{diag}(A) - \theta I$ is applied at
+**every** correction step, and once coupling dominates the diagonal, $K$ is a
+bad model of $A - \theta I$ throughout the whole run, not just at the start —
+no amount of exploring around a bad anchor compensates for a preconditioner
+that stays wrong. This is exactly the gap `gipt.py`'s generalized splitting
+already closes by replacing $\mathrm{diag}(A)$ with a structured $M$ that
+actually captures the dominant coupling (measured ~60× basin widening there);
+Davidson with a genuinely better $M$ in place of the diagonal, rather than a
+better starting vector, is the untried combination this points to next.
+
+## The map, for future work
+
+| capability | function | wins against | measured |
+|---|---|---|---|
+| symmetric near-diagonal | `ipt_eigh` | `dsyevd` | 1.4–1.9× |
+| general near-diagonal | `ipt_eig` | `dgeev` | 4–12× |
+| normal (any) | `normal_eig` | `dgeev` | 1.3–1.9×, unitary |
+| $k$ eigenpairs, interior, near-diagonal columns | `ipt_eig_partial` | ARPACK shift-invert | 4–123× |
+| $k$ eigenpairs, arbitrary input | `eig_partial` | ARPACK (never worse) | 6.4–9.1× when it qualifies |
+| single eigenpair, wider basin | `davidson_eig` | `ipt_eig_partial` | 16× basin, faster inside it |
+| single eigenpair, resonant/lattice | `block_ipt_eig`, `adaptive_block_ipt_eig` | plain IPT | up to 100× basin |
+| single eigenpair, band/block-dominant | `gipt_eig(mode="inverse")` | plain IPT | ~60× basin |
+| all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |
+| dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
+
+Dead ends worth not retrying, all measured rather than assumed: Anderson
+acceleration on IPT (no basin extension at any depth); Jacobi–Davidson, both
+diagonal-projected and inner-PCG variants (no improvement or strictly worse
+total cost than plain Davidson); LOBPCG/block-Davidson on the $k$-eigenpair
+problem (10–100× *slower* than ARPACK — the win there was never
+"no factorization", it was IPT's low iteration count, and anything needing
+tens to hundreds of iterations loses that trade); Chebyshev-filtered subspace
+iteration for interval eigensolving (looked 4–6× faster at mismatched
+accuracy, 0.6–0.75× slower and unreliable at matched accuracy); Lanczos-seeded
+Davidson starting vectors (does not fix a preconditioner that is wrong
+throughout the run, only ever helps preconditioners that are merely
+*starting* wrong).
