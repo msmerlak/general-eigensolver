@@ -413,26 +413,43 @@ def ipt_eig_partial(A, cols, tol=1e-13, max_iter=200, return_info=False,
     need shift-invert (an O(N^3) factorization per shift) to reach the middle.
     Here an interior target costs no more than an extremal one.
 
+    A may be dense or scipy.sparse. Sparse is the natural home for this: the
+    iteration is matvec-only and needs NO FACTORIZATION, whereas shift-invert
+    Krylov must factor (A - sigma I), where fill-in is what actually hurts on
+    sparse problems.
+
     Same basin as the full method (rho = max|W_ij|/|d_i - d_j| < ~1), and the
     same honesty about it: non-convergence is reported, never hidden.
 
     Returns (w, V) with w of length k and V of shape (n, k), columns unit-norm.
     """
-    xp = _am(A)
-    A = xp.asarray(A)
-    n = A.shape[0]
-    if A.dtype.kind not in "cf":
-        A = A.astype(np.float64)
+    sparse = hasattr(A, "tocsr")          # scipy.sparse matrix
+    if sparse:
+        import scipy.sparse as _sp
+        xp = np
+        n = A.shape[0]
+        d = np.asarray(A.diagonal()).ravel().astype(np.float64)
+        W = (A - _sp.diags(d)).tocsr()
+    else:
+        xp = _am(A)
+        A = xp.asarray(A)
+        n = A.shape[0]
+        if A.dtype.kind not in "cf":
+            A = A.astype(np.float64)
+        d = xp.diag(A).copy()
+        W = A - xp.diag(d)
     cols = np.asarray(cols, dtype=int)
     k = len(cols)
-
-    d = xp.diag(A).copy()
-    W = A - xp.diag(d)
-    norm_A = float(xp.linalg.norm(A, ord="fro")) / max(np.sqrt(n), 1.0)
+    if sparse:
+        norm_A = float(np.sqrt(A.multiply(A).sum())) / max(np.sqrt(n), 1.0)
+        dtype = np.float64 if A.dtype.kind == "f" else A.dtype
+    else:
+        norm_A = float(xp.linalg.norm(A, ord="fro")) / max(np.sqrt(n), 1.0)
+        dtype = A.dtype
     if norm_A == 0.0:
         norm_A = 1.0
 
-    V = xp.zeros((n, k), dtype=A.dtype)
+    V = xp.zeros((n, k), dtype=dtype)
     V[cols, xp.arange(k)] = 1.0
     dsel = d[cols]
     rows = xp.arange(k)
@@ -484,6 +501,21 @@ def ipt_rate_columns(A, cols):
     that, and it is the ordinary situation for an impurity level in a band, a
     defect state in a gap, or any localized mode. Screening per column finds
     those; the global rate would reject the whole matrix.
+
+    IMPORTANT -- this is a ONE-HOP HEURISTIC, not a guarantee, and it is
+    OPTIMISTIC. It measures direct coupling only, while the underlying
+    perturbation series sums over multi-hop paths, where distant
+    near-degenerate sites resonate. Measured failures of the naive reading:
+
+        dense, isolated level:        rho_j = 0.18 diverges (needs <~ 0.05)
+        2D Anderson lattice, W = 12:  rho_j = 0.25 diverges (needs <~ 0.04)
+
+    The sparse/structured case is the worse of the two, because a lattice has
+    many far-apart sites at nearly equal energy that one hop cannot see -- the
+    classic resonance problem of locator expansions. Treat rho_j as a cheap
+    NECESSARY-ish indicator for ranking candidates, gate conservatively
+    (<= 0.1), and always check the returned `converged` flag rather than
+    trusting the screen.
     """
     xp = _am(A)
     A = xp.asarray(A)

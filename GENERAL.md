@@ -556,3 +556,62 @@ matrices with targeted interior eigenpairs — exactly the setting where the
 alternatives are worst: a full dense solve wastes $N/k$ of its work, and
 shift-invert Krylov pays a cubic factorization to look at the middle of the
 spectrum.
+
+
+---
+
+# Making it broadly usable, and a correction
+
+## Randomized/sampling methods cannot go inside the iteration
+
+Worth stating precisely, since it is the obvious thing to try. A sketched
+matvec has error $\sim\|W\|\|V\|/\sqrt{s}$, so reaching $10^{-13}$ would
+need $s \sim 10^{26}$ samples. Mixed precision worked earlier because SSJ is
+*memoryless* and re-derives its angles from a fresh $B$ every sweep; IPT has
+no such structure to exploit, and with 4–9 iterations (the first one free)
+there is almost no cheap early phase to economize on. Randomization's role
+here is the fallback and target selection, not the inner loop.
+
+## Correction: the per-column rate is a heuristic, and it is optimistic
+
+An earlier section of this document presented $\rho_j$ as a free, reliable
+screen. Measurement says otherwise. $\rho_j$ counts **direct, one-hop**
+coupling only, while the underlying perturbation series sums over multi-hop
+paths, where far-apart near-degenerate sites resonate — the classic problem
+of locator expansions.
+
+| case | $\rho_j$ | converges? | actually needs |
+|---|---|---|---|
+| dense, isolated level | 0.18 | **no** | $\lesssim 0.05$ |
+| 2D Anderson lattice, $W=12$ | 0.25 | **no** | $\lesssim 0.04$ |
+
+The sparse/lattice case is the worse of the two, and it deflates a hope worth
+recording: **sparse localized states are not automatically IPT's home turf.**
+A 2D Anderson model only enters the basin at disorder $W \gtrsim 80$, far
+beyond the physically interesting regime, because a lattice has many distant
+sites at nearly equal energy that one hop cannot see.
+
+## The design that survives this
+
+`eig_partial` (in `src/ssj/dispatch.py`) screens each target with $\rho_j$,
+routes to IPT or ARPACK per target, and — because the screen is unreliable —
+is built so that **a wrong screen costs time, never correctness**: if IPT is
+attempted and fails to converge, those targets go to ARPACK and the
+unconverged output is discarded. The default gate is 0.1, calibrated against
+the failures above rather than against theory.
+
+Measured on impurity levels, routing overhead included:
+
+| $N$ | screen | auto-routed | forced ARPACK | speedup |
+|---|---|---|---|---|
+| 500 | 0.21 ms | 0.0049 s | 0.0318 s | **6.4×** |
+| 1000 | 0.27 ms | 0.0105 s | 0.0720 s | **6.9×** |
+| 2000 | 0.43 ms | 0.0492 s | 0.4488 s | **9.1×** |
+
+And on input where no target qualifies (Ginibre), the overhead against calling
+ARPACK directly is **0.0%** at $N=1000$ — the screen is three orders of
+magnitude cheaper than either solver, so it disappears into the noise.
+
+That is what "broadly usable" can honestly mean here: never materially worse
+than the standard tool, up to two orders of magnitude better when targets are
+genuinely isolated, and never wrong when the indicator misjudges.

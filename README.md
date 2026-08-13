@@ -46,7 +46,14 @@ Crucially the **basin is per-column too** (`ipt_rate_columns`, O(Nk)), which
 is much weaker than needing a near-diagonal matrix: a dense strongly-coupled
 band with global ρ = 992, where the full solver diverges, still yields its
 isolated impurity/defect levels to machine precision — **20–123× faster than
-ARPACK**. See [GENERAL.md](GENERAL.md).
+ARPACK**.
+
+For arbitrary input use **`eig_partial(A, sigma=..., k=...)`**, which screens
+each target and routes it to IPT or ARPACK. The per-column rate is a *one-hop
+heuristic and is optimistic*, so the router is built so a wrong screen costs
+time, never correctness — unconverged IPT output is discarded and the target
+re-run on ARPACK. Measured: 6.4–9.1× on isolated targets, and 0.0% overhead
+when nothing qualifies. See [GENERAL.md](GENERAL.md).
 
 For the hard remainder — dense, non-normal, far from diagonal — `sdc_eigvals`
 (spectral divide and conquer via the matrix sign function) solves it to 1e-13
