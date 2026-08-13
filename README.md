@@ -55,6 +55,14 @@ time, never correctness — unconverged IPT output is discarded and the target
 re-run on ARPACK. Measured: 6.4–9.1× on isolated targets, and 0.0% overhead
 when nothing qualifies. See [GENERAL.md](GENERAL.md).
 
+**Largest margin in the repository — large sparse, interior targets.** On
+sparse matrices with wide diagonal spread and weak coupling, interior targets
+force Krylov methods into shift-invert, whose LU fill-in explodes on random
+sparsity (88× → 431× of nnz as N goes 2k → 10k, infeasible at 20k). IPT needs
+3–5 sparse matvecs and no factorization: **8× → 347× faster than the best
+alternative** (LOBPCG on the shifted-squared operator; ~20,000× vs ARPACK
+shift-invert), with the margin *growing* with N. See `bench_sparse.py`.
+
 `window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
 purification (matmul only, no factorization, no target guess) with a
 *certified* count — unlike ARPACK shift-invert, which needs `k` guessed up

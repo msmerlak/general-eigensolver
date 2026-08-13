@@ -1194,3 +1194,70 @@ accuracy, 0.6–0.75× slower and unreliable at matched accuracy); Lanczos-seede
 Davidson starting vectors (does not fix a preconditioner that is wrong
 throughout the run, only ever helps preconditioners that are merely
 *starting* wrong).
+
+
+---
+
+# The largest margin found: large sparse, interior targets
+
+Every earlier partial-solver benchmark here was **dense**, where ARPACK's
+shift-invert factorization is $O(N^3/3)$ — expensive but affordable — so the
+margin came from IPT's low iteration count and topped out around 4–123×. The
+previous section concluded the advantage "was never no-factorization, it was
+iteration count". That conclusion was right about the dense case and
+**understated the sparse one**, where the two effects compound.
+
+On sparse input, targeting an *interior* eigenvalue forces any Krylov method
+into shift-invert, i.e. factorizing $(A - \sigma I)$. For sparsity with no
+good elimination ordering — a random graph, as opposed to a lattice or a
+banded matrix — the fill-in explodes:
+
+| $N$ | nnz | LU fill-in |
+|---|---|---|
+| 2,000 | 33,880 | **88.7×** nnz |
+| 5,000 | 84,868 | **222.1×** nnz |
+| 10,000 | 169,866 | **430.7×** nnz |
+| 20,000 | 339,826 | factorization no longer affordable |
+
+IPT needs no factorization at all — 3–5 iterations, each one sparse matvec.
+
+## Measured, against BOTH the standard tool and a fair matvec-only competitor
+
+`bench_sparse.py`. The honest competitor is not only ARPACK: LOBPCG on
+$(A-\sigma I)^2$ targets the interior with **no factorization either**, at the
+cost of squaring the conditioning. Both are reported.
+
+| $N$ | IPT | ARPACK shift-invert | LOBPCG $(A-\sigma)^2$ | **IPT vs best** |
+|---|---|---|---|---|
+| 2,000 | 0.0025 s | 1.00 s | 0.021 s | **8×** |
+| 5,000 | 0.0045 s | 16.1 s | 0.104 s | **23×** |
+| 10,000 | 0.0070 s | 140.6 s | 1.91 s | **273×** |
+| 20,000 | 0.0179 s | *LU infeasible* | 6.19 s | **347×** |
+
+Against ARPACK alone the ratio reaches ~20,000× at $N=10{,}000$. Against the
+*best* alternative it is 8× → 347×, and **the margin grows with $N$**: IPT's
+iteration count is set by its rate, not the matrix size (3–5 throughout),
+while LOBPCG's squared-conditioning penalty worsens and the factorization
+route dies outright.
+
+## Verified correct, not merely low-residual
+
+A solver that collapsed all four columns onto a single eigenvalue would also
+show a small residual, so correctness is checked against dense ground truth
+at sizes where that is affordable:
+
+| $N$ | max $|\lambda - \lambda_{\mathrm{true}}|$ | relative to $\|A\|_2$ | distinct eigenvalues |
+|---|---|---|---|
+| 1,000 | 4.5e-13 | 4.6e-16 | 4 of 4 |
+| 2,000 | 4.5e-13 | 2.3e-16 | 4 of 4 |
+
+## Scope, stated honestly
+
+This is the family IPT was designed for and it should be read that way: wide
+diagonal spread, weak sparse coupling, so the per-column rate is tiny and the
+basin condition is comfortably satisfied. It is a realistic family —
+configuration-interaction Hamiltonians and random-network models look like
+this — but it is *not* evidence about lattices, where GENERAL.md records that
+2D Anderson defeats every method here including this one, nor about matrices
+whose diagonal carries no spectral information. The `ipt_rate_columns` screen
+(O(Nk), free) is what tells the two apart before committing.
