@@ -55,6 +55,14 @@ time, never correctness — unconverged IPT output is discarded and the target
 re-run on ARPACK. Measured: 6.4–9.1× on isolated targets, and 0.0% overhead
 when nothing qualifies. See [GENERAL.md](GENERAL.md).
 
+The screen is in fact not even *monotonic* — in a measured 4-target batch the
+column with the lowest ρ (0.042) was the only one to diverge while ρ = 0.096
+converged to 4.5e-15 — so no gate value could route that batch correctly.
+What makes the router sound is the **per-column outcome**: `ipt_eig_partial`
+reports `converged_cols` / `failed`, columns retire independently (one bad
+target no longer aborts its neighbours mid-flight), and the fallback re-runs
+only the targets that actually failed.
+
 **Largest margin in the repository — large sparse, interior targets.** On
 sparse matrices with wide diagonal spread and weak coupling, interior targets
 force Krylov methods into shift-invert, whose LU fill-in explodes on random

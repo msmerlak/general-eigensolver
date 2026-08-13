@@ -77,16 +77,29 @@ def test_partial_reports_divergence():
 
 
 def test_partial_cost_scales_with_k_not_n():
-    """k columns must cost ~k/N of the full run, not the same."""
-    A = near_diagonal(400, 0.05)
+    """k columns must cost ~k/N of the full run, not the same.
+
+    Timed as min-of-several after a warmup call: a single cold measurement of
+    a ~2 ms operation on a shared runner is dominated by first-touch effects
+    and made this assertion fail roughly one run in six, independently of
+    what it was measuring. Minimum over repeats is the noise-robust statistic
+    (noise only ever adds time).
+    """
     import time
-    t0 = time.perf_counter()
-    ipt_eig_partial(A, list(range(4)))
-    t_small = time.perf_counter() - t0
-    t0 = time.perf_counter()
-    ipt_eig(A)
-    t_full = time.perf_counter() - t0
-    assert t_small < t_full / 5
+    A = near_diagonal(400, 0.05)
+
+    def best(fn, repeats=5):
+        fn()                                   # warm up, discard
+        return min(_timed(fn) for _ in range(repeats))
+
+    def _timed(fn):
+        t0 = time.perf_counter()
+        fn()
+        return time.perf_counter() - t0
+
+    t_small = best(lambda: ipt_eig_partial(A, list(range(4))))
+    t_full = best(lambda: ipt_eig(A))
+    assert t_small < t_full / 5, (t_small, t_full)
 
 
 def band_plus_impurities(n, niso=4, coupling=0.05, seed=0):

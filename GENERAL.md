@@ -1352,10 +1352,76 @@ Two operational consequences, both of which cost real debugging time here:
   still *works* but much of the advantage is gone, surviving only where the
   alternative factorization has become infeasible outright.
 * **Divergence can be slow, so `max_iter` can lie.** The $N=2000$,
-  $\rho = 0.096$ row took **763 iterations** to declare failure, and a
-  neighbouring case needed 76 iterations to succeed. With a tight `max_iter`
-  the two are indistinguishable: an early run of this sweep reported
-  divergence at $\rho = 0.12$ that was merely slow convergence under
-  `max_iter=60`. Read `converged=False` as "did not converge in the budget
-  given", and if the answer matters, re-run with a larger budget before
-  concluding the target is outside the basin.
+  $\rho = 0.096$ row originally took **763 iterations** to declare failure,
+  and a neighbouring case needed 76 iterations to *succeed*. With a tight
+  `max_iter` the two are indistinguishable: an early run of this sweep
+  reported divergence at $\rho = 0.12$ that was merely slow convergence under
+  `max_iter=60`. This is now largely fixed (see below, 763 → 40), but the
+  caveat remains: read `converged=False` as "did not converge in the budget
+  given", and re-run with a larger budget before concluding the target is
+  outside the basin.
+
+## Two consequences of column-separability that were not being exploited
+
+Both of the problems above are about *reporting*, and both had the same root
+cause: the solver treated convergence as one fact about the batch when the
+map makes it a fact about each column.
+
+**A diverging target used to spoil its neighbours.** The abort was a global
+test on $\max_j \|\Delta V_j\|$, so one bad column stopped the whole
+iteration. Measured on a batch of four ($N=4000$, three isolated targets plus
+one deliberately resonant one): the run aborted at iteration 6 and the *good*
+columns came back at residual 4.4e-10, when alone they reach 5.7e-17 in 11
+iterations. Retiring columns individually fixes this — the same batch now
+returns 6.5e-16 / 2.0e-16 / 1.7e-15 on the three good columns and flags only
+the fourth. Nothing is lost by retiring late, either: a converged column
+already sits at its fixed point, and the columns never interact.
+
+**The screen cannot say *which* column will fail — only the outcome can.**
+This is the sharpest version of the "$\rho$ is a one-hop heuristic" caveat.
+In a measured 4-target batch ($N=2000$, coupling 80):
+
+| target | $\rho_j$ (screen) | outcome | residual |
+|---|---|---|---|
+| 0 | 0.064 | converged | 5.2e-15 |
+| 1 | **0.096** (worst) | converged | 4.5e-15 |
+| 2 | 0.086 | converged | 1.7e-15 |
+| 3 | **0.042** (best) | **diverged** | 5.6e-08 |
+
+The screen ranks the only failing target as the *safest* of the four. So
+$\rho_j$ is not merely optimistic, it is **not monotonic**, and no gate value
+could have routed this batch correctly. What makes the dispatcher sound is
+therefore not the screen but the per-column outcome: `eig_partial` now falls
+back on exactly the columns that failed, where before one failure sent all
+four targets to ARPACK.
+
+`ipt_eig_partial` reports `converged_cols`, `err_cols`, `iters_cols` and
+`failed` alongside the scalar `converged` (which is now simply
+`converged_cols.all()`, so existing callers are unaffected).
+
+**Detecting divergence promptly.** A blow-up test ($\|\Delta V\| > 10^3\times$
+its initial value) is a poor detector for a contraction factor just above 1:
+the error creeps rather than explodes, which is what made that row take 763
+iterations. Replacing it with a windowed *no-net-progress* test — no
+improvement against the best error seen over the last `patience` iterations —
+cuts that to **40**, with the other divergent rows falling 264 → 72 and
+146 → 66. The test is windowed rather than per-step deliberately: a slowly
+diverging column's step ratio dips below 1 often enough to keep resetting a
+consecutive-step counter (that version still needed 420 iterations). Verified
+not to cut short genuine slow convergence — cases needing 25, 40, 76 and even
+322 iterations all still converge, and identically at `patience` 12 and 30.
+
+**Cost of all this: about 3–7%, at the noise floor.** The per-column path is
+not free, and two versions of it were measurably worse before this one. The
+per-column maximum is the expensive part — reducing a C-ordered $(n,k)$ array
+along axis 0 is a strided pass, measured 775 µs against 67 µs for the flat
+maximum at $N=20{,}000$, $k=4$ — so the common iteration takes only the flat
+maximum and per-column status is computed just when it can change something
+(everything converged, something blew up, or once per stall window). Two
+other regressions came from materializing an output buffer unconditionally
+(an extra $(n,k)$ allocation plus a strided gather/scatter: 38% at $k=256$)
+and from holding the `abs` temporary alive across iterations, which blocks
+buffer reuse (~10% at small $k$). Interleaved A/B against the previous
+implementation now reads 3.8 vs 3.5 ms ($N$=5000, $k$=4), 13.5 vs 13.1 ms
+($N$=20,000, $k$=4) and 506 vs 492 ms ($N$=20,000, $k$=256), with one of
+three rounds showing the new code faster on all three.

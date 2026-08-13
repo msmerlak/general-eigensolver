@@ -27,6 +27,14 @@ output is discarded. The worst case is the screen's O(Nk) plus some wasted
 IPT iterations on top of the fallback; the best case is up to two orders of
 magnitude, on targets that are genuinely isolated.
 
+The fallback is decided PER COLUMN, not per batch. That matters because the
+screen is not even monotonic: in a measured 4-target batch the column with
+the LOWEST rho (0.042) was the only one to diverge, while rho = 0.096
+converged to 4.5e-15. So the screen cannot say which target will fail, only
+the outcome can -- and since the map is column-separable, one failure is no
+evidence against the others. Falling back per batch would have sent all four
+targets to ARPACK where one was needed.
+
 Targets may be given as column indices (`cols`) or as a value to hunt near
 (`sigma`), in which case the diagonal entries closest to sigma are used --
 the natural targeting for a near-diagonal problem, where d_j is already an
@@ -105,13 +113,18 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=0.1, tol=1e-13,
         sel = cols[use_ipt]
         wi, Vi, info_i = ipt_eig_partial(A, sel, tol=tol, max_iter=max_iter,
                                          return_info=True)
-        if info_i["converged"]:
-            w[use_ipt] = wi
-            V[:, use_ipt] = Vi
-        else:
-            # The screen passed but the iteration did not converge; do not
-            # return unconverged output, hand these targets to the fallback.
-            use_ipt[:] = False
+        # Keep the columns that converged and fall back on only the ones that
+        # did not. IPT's map is column-separable, so a failure in one target
+        # says nothing about the others -- and the screen cannot predict which
+        # will fail: measured, a batch where the LOWEST-rho target (0.042) was
+        # the only divergent one while rho = 0.096 converged to 4.5e-15.
+        # Discarding the whole batch would send 4 targets to the fallback
+        # where 1 is required.
+        idx = np.flatnonzero(use_ipt)
+        ok = np.asarray(info_i["converged_cols"], dtype=bool)
+        w[idx[ok]] = wi[ok]
+        V[:, idx[ok]] = Vi[:, ok]
+        use_ipt[idx[~ok]] = False
 
     if (~use_ipt).any():
         rest = cols[~use_ipt]

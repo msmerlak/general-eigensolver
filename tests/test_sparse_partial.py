@@ -139,6 +139,64 @@ def test_fails_loudly_outside_the_basin():
         assert bool(info["converged"]) is expect, (coupling, info)
 
 
+def _mixed_batch():
+    """A batch where 3 of 4 targets converge and 1 does not -- and where the
+    screen ranks the FAILING one as the safest (rho 0.042 vs 0.064/0.086/
+    0.096 for the three that succeed), so only the outcome distinguishes."""
+    A0, d = sparse_diagonally_dominant(2000, seed=5)
+    A = sp.diags(d) + 80.0 * (A0 - sp.diags(d))
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:4])
+    return A, cols
+
+
+def test_one_bad_target_does_not_spoil_its_neighbours():
+    """Columns are mathematically independent, so a diverging target must not
+    abort the others mid-flight. Before per-column retirement the global abort
+    fired on the bad column and left good ones at 4e-10 instead of 6e-16."""
+    A, cols = _mixed_batch()
+    w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True,
+                                 max_iter=1000)
+    conv = np.asarray(info["converged_cols"])
+    assert conv.sum() == 3 and not info["converged"]
+    assert list(info["failed"]) == [3]
+    nrm = float(np.max(np.abs(A.diagonal()))) + 1.0
+    resid = np.linalg.norm(A @ V - V * w, axis=0) / nrm
+    # the converged ones reach ~4e-13 relative; the failed one sits at ~4e-6,
+    # seven orders away, so the per-column flag is not a marginal distinction
+    assert np.max(resid[conv]) < 1e-11
+    assert resid[~conv][0] > 1e-8
+
+
+def test_screen_is_not_monotonic_so_only_outcome_decides():
+    """Guards the claim in dispatch.py: the lowest-rho target is the one that
+    fails here, so the screen cannot be used to predict which target diverges
+    -- which is exactly why the fallback must be per column."""
+    from ssj.ipt import ipt_rate_columns
+    A, cols = _mixed_batch()
+    rho = ipt_rate_columns(A, cols)
+    _, _, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True,
+                                 max_iter=1000)
+    failed = np.asarray(info["failed"])
+    assert len(failed) == 1
+    assert rho[failed[0]] == np.min(rho)   # the SAFEST-looking one failed
+
+
+def test_divergence_is_detected_promptly():
+    """A blow-up test alone needed 763 iterations to give up on a slowly
+    diverging column; the no-new-best test must be far quicker, without
+    aborting genuinely slow convergence (checked in the same sweep)."""
+    A0, d = sparse_diagonally_dominant(2000, seed=5)
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:3])
+    W = A0 - sp.diags(d)
+    _, _, bad = ipt_eig_partial(sp.diags(d) + 320.0 * W, cols, hermitian=True,
+                                return_info=True, max_iter=1000)
+    assert not bad["converged"] and bad["iters"] < 100
+    # and a slow-but-real convergence in the same family is NOT cut short
+    _, _, slow = ipt_eig_partial(sp.diags(d) + 100.0 * W, cols, hermitian=True,
+                                 return_info=True, max_iter=1000)
+    assert slow["converged"] and slow["iters"] > 30
+
+
 def test_rate_screen_accepts_sparse_without_densifying():
     """The screen is recommended precisely for the large-sparse case, so it
     must not build a dense N-by-N intermediate to compute an O(Nk) quantity.
