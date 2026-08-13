@@ -99,7 +99,8 @@ def _angles(B: np.ndarray) -> np.ndarray:
     # breaks anti-Hermiticity -- orient the tie by the triangle instead.
     tie = (gap == 0.0) & (absB > 0.0)
     if bool(tie.any()):
-        upper = xp.triu(xp.ones((n, n)), 1) - xp.tril(xp.ones((n, n)), -1)
+        one = xp.ones((n, n), dtype=theta.dtype)
+        upper = xp.triu(one, 1) - xp.tril(one, -1)
         theta = xp.where(tie, (np.pi / 4.0) * upper, theta)
     if B.dtype.kind == "c":
         nonzero = absB > 0
@@ -164,7 +165,7 @@ def _orth_ns_adaptive(Y: np.ndarray, target: float, max_iter: int = 60) -> tuple
     """
     xp = _am(Y)
     n = Y.shape[0]
-    eye = xp.eye(n)
+    eye = xp.eye(n, dtype=Y.dtype)
     gemms = 0
     prev = np.inf
     for _ in range(max_iter):
@@ -179,20 +180,32 @@ def _orth_ns_adaptive(Y: np.ndarray, target: float, max_iter: int = 60) -> tuple
     return Y, gemms
 
 
-def _power_iter_norm_antisym(K: np.ndarray, iters: int = 30) -> float:
-    """Estimate ||K||_2 for anti-Hermitian K by power iteration on K^H K."""
+def _power_iter_norm_antisym(K, v0=None, iters: int = 25):
+    """Estimate ||K||_2 for anti-Hermitian K by power iteration on K^H K.
+
+    Returns (estimate, v) so the dominant vector can warm-start the next
+    sweep's estimate -- the generator changes slowly sweep-to-sweep, and a
+    warm-started estimate needs only a few iterations (a cold 30-iteration
+    estimate every sweep measured ~2s of matvecs over a full N=1000 solve).
+    A modest underestimate is safe: it weakens the cap slightly, and the
+    sqrt(3)/sqrt(2) Newton-Schulz headroom absorbs it.
+    """
     xp = _am(K)
     n = K.shape[0]
-    v = 1.0 + 0.01 * xp.arange(n)
-    v /= xp.linalg.norm(v)
+    if v0 is None:
+        v = 1.0 + 0.01 * xp.arange(n)
+    else:
+        v = v0
+        iters = 8
+    v = v / xp.linalg.norm(v)
     est = 0.0
     for _ in range(iters):
         w = K.conj().T @ (K @ v)
         est = float(xp.linalg.norm(w))
         if est == 0.0:
-            return 0.0
+            return 0.0, None
         v = w / est
-    return float(np.sqrt(est))
+    return float(np.sqrt(est)), v
 
 
 def ssj_eigh(
@@ -205,6 +218,9 @@ def ssj_eigh(
     gemm_ns_factor: float = 0.05,
     return_info: bool = False,
     X0: np.ndarray | None = None,
+    precision: str = "full",
+    mixed_switch: float = 1e-4,
+    prologue: int = 0,
 ):
     """Eigendecomposition of a real symmetric or complex Hermitian matrix by
     Simultaneous Saturated Jacobi sweeps.
@@ -231,6 +247,26 @@ def ssj_eigh(
         nearby matrix). It is orthonormalized on entry, so a slightly drifted
         basis is fine. A warm start within off(B)/||A||_2 ~ 1e-2 of
         diagonalizing lands directly in the quadratic tail (~3-5 sweeps).
+    precision : "full" (default) or "mixed". Mixed runs the linear phase in
+        float32/complex64 down to off(B)/||A||_2 < mixed_switch, then
+        warm-starts the full-precision phase from the low-precision basis.
+        Sound because the map is memoryless -- every sweep re-derives its
+        angles from a fresh B, so low-precision sweeps cannot poison the
+        final accuracy, only the warm start's quality; the float64 tail
+        restores full accuracy in a few sweeps. On CPU the low phase runs at
+        sgemm speed (~2x); on tensor-core GPUs the same split is worth far
+        more.
+    mixed_switch : hand-off tolerance for the low-precision phase. The
+        default 1e-4 is conservatively above float32's resolution; the low
+        phase is also capped at 100 sweeps so a hand-off set too close to
+        float32's floor degrades to a slightly worse warm start instead of
+        stalling.
+    prologue : number of unshifted QR-algorithm steps (B <- RQ, X <- XQ) to
+        run before the first sweep. Off-diagonals decay like |lambda_i /
+        lambda_j|^k under these steps, so a few of them collapse the sweep
+        count for graded / rapidly decaying spectra (measured: 45 -> 5 sweeps
+        with prologue=3 on spectrum 2^-i) and do nothing for flat spectra
+        like GOE. Each step costs about one sweep. Ignored when X0 is given.
 
     Returns
     -------
@@ -242,8 +278,35 @@ def ssj_eigh(
     A = xp.asarray(A)
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
         raise ValueError("A must be square")
-    if A.dtype.kind != "c":
+    if A.dtype.kind != "c" and A.dtype != np.float32:
         A = A.astype(np.float64, copy=False)
+
+    if precision == "mixed":
+        low_dt = np.complex64 if A.dtype.kind == "c" else np.float32
+        _, V_low, info_low = ssj_eigh(
+            A.astype(low_dt), tol=max(mixed_switch, tol), method=method,
+            max_sweeps=min(max_sweeps, 100), ns_switch=ns_switch,
+            gemm_cap=gemm_cap, gemm_ns_factor=gemm_ns_factor,
+            return_info=True,
+            X0=None if X0 is None else xp.asarray(X0).astype(low_dt),
+            prologue=prologue,
+        )
+        full_dt = np.complex128 if A.dtype.kind == "c" else np.float64
+        w, V, info = ssj_eigh(
+            A.astype(full_dt), tol=tol, method=method,
+            max_sweeps=max_sweeps, ns_switch=ns_switch, gemm_cap=gemm_cap,
+            gemm_ns_factor=gemm_ns_factor, return_info=True,
+            X0=V_low.astype(full_dt),
+        )
+        if return_info:
+            info["sweeps_low"] = info_low["sweeps"]
+            info["gemms_low"] = info_low["gemms"]
+            info["history_low"] = info_low["history"]
+            info["sweeps_total"] = info_low["sweeps"] + info["sweeps"]
+            return w, V, info
+        return w, V
+    elif precision != "full":
+        raise ValueError(f"unknown precision {precision!r}")
 
     n = A.shape[0]
     norm_A = _spectral_norm_estimate(A)
@@ -255,6 +318,13 @@ def ssj_eigh(
 
     if X0 is None:
         X = xp.eye(n, dtype=A.dtype)
+        if prologue > 0:
+            B = A
+            for _ in range(prologue):
+                Q, R = xp.linalg.qr(B)
+                B = R @ Q
+                B = (B + B.conj().T) / 2.0
+                X = X @ Q
     else:
         X0 = xp.asarray(X0)
         if X0.shape != (n, n):
@@ -265,6 +335,7 @@ def ssj_eigh(
     gemms = 0
     converged = False
     sweeps = 0
+    pow_v = None  # warm-started power-iteration vector ("gemm" method)
 
     for _ in range(max_sweeps):
         B = X.conj().T @ (A @ X)
@@ -302,11 +373,19 @@ def ssj_eigh(
                 X = _orth_qr(Y) if method == "auto" else _orth_cholqr2(Y)
         elif method == "gemm":
             gemms += 3  # B (2 gemms) + X @ K (1 gemm)
-            sigma = _power_iter_norm_antisym(K)
+            sigma, pow_v = _power_iter_norm_antisym(K, v0=pow_v)
             if sigma > gemm_cap:
                 K = K * (gemm_cap / sigma)
                 Y = X @ (eye + K)
                 gemms += 1
+            # NS pre-scaling: the polar factor is invariant under positive
+            # scalar scaling, and sigma(I+K) spans [1, sqrt(1+sigma_c^2)]
+            # exactly (K anti-Hermitian), so dividing Y by the geometric
+            # mean (1+sigma_c^2)^(1/4) centers the singular values around 1
+            # and saves Newton-Schulz iterations while sigma_c is large.
+            sigma_c = min(sigma, gemm_cap)
+            if sigma_c > 0.1:
+                Y = Y / (1.0 + sigma_c * sigma_c) ** 0.25
             X, ns_gemms = _orth_ns_adaptive(Y, target=gemm_ns_factor * rel_off)
             gemms += ns_gemms
         else:

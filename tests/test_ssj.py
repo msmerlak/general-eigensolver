@@ -120,6 +120,35 @@ def test_warm_start():
     assert np.linalg.norm(V.T @ V - np.eye(120), "fro") < 1e-11
 
 
+def test_mixed_precision():
+    rng = np.random.default_rng(9)
+    M = rng.standard_normal((150, 150))
+    A = (M + M.T) / np.sqrt(300.0)
+    w, V, info = ssj_eigh(A, precision="mixed", return_info=True)
+    assert info["converged"] and info["sweeps"] <= 8  # f64 phase is a short tail
+    assert np.max(np.abs(w - np.linalg.eigvalsh(A))) < 1e-12
+    assert np.linalg.norm(V.T @ V - np.eye(150), "fro") < 1e-11
+    # complex + gemm path
+    Mc = rng.standard_normal((60, 60)) + 1j * rng.standard_normal((60, 60))
+    Ac = (Mc + Mc.conj().T) / 2.0
+    w, V, info = ssj_eigh(Ac, precision="mixed", method="gemm", return_info=True)
+    assert info["converged"]
+    assert np.max(np.abs(w - np.linalg.eigvalsh(Ac))) < 1e-11 * np.linalg.norm(Ac, 2)
+    assert np.linalg.norm(V.conj().T @ V - np.eye(60), "fro") < 1e-11
+
+
+def test_qr_prologue():
+    rng = np.random.default_rng(3)
+    Q, _ = np.linalg.qr(rng.standard_normal((100, 100)))
+    A = (Q * 2.0 ** (-np.arange(100, dtype=float))) @ Q.T
+    A = (A + A.T) / 2.0
+    base = ssj_eigh(A, return_info=True)[2]["sweeps"]
+    w, V, info = ssj_eigh(A, prologue=3, return_info=True)
+    assert info["converged"] and info["sweeps"] < base / 2
+    assert np.max(np.abs(w - np.linalg.eigvalsh(A))) < 1e-12
+    assert np.linalg.norm(V.T @ V - np.eye(100), "fro") < 1e-11
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

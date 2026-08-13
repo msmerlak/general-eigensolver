@@ -186,6 +186,66 @@ gemm-equivalents, ~20 gemms per tracking update is a 3–10× win, and even the
 cold-start gemm variant (~330 gemms at $N=1000$) reaches the boundary of that
 range. Unmeasured here — this container has no such accelerator.
 
+## Accelerations explored
+
+Five candidates, implemented and measured. Two won and are in core, one is a
+core option for a specific matrix class, two are quantified dead ends.
+
+**Mixed precision (`precision="mixed"`) — in core, ~1.3–1.4× on CPU.** The
+linear phase runs in float32 down to $\mathrm{off}(B)/\|A\| < 10^{-4}$, then
+the float64 phase warm-starts from the float32 basis (2–5 sweeps to
+$10^{-13}$). Sound because the map is memoryless: every sweep re-derives its
+angles from a fresh $B$, so low-precision sweeps can only degrade the warm
+start, never the final accuracy — all runs finish at $d\lambda \sim 10^{-14}$.
+Measured (GOE $N=1000$, best of 3): `auto` 6.15 s → `auto` mixed 4.92 s;
+`gemm` 5.98 s → `gemm` mixed **4.60 s** (vs `qr` 6.41 s). The CPU split is
+limited by this stack's kernels: sgemm runs 2.5× dgemm but **sgeqrf is not
+faster than dgeqrf** (0.93×), which is why the factorization-free `gemm`
+method profits most from the float32 phase. On tensor-core GPUs the same
+split is worth far more (float32/TF32 throughput 8–16× FP64): in mixed mode
+the $N=1000$ solve needs only ~24 FP64 gemms plus ~254 float32 gemms — at
+tensor-core rates ≈ 50–60 FP64-gemm-equivalents total, which moves the
+*cold-start* case into the competitive range of the GPU section below.
+
+**Power-iteration warm start — in core.** The `gemm` method's spectral-norm
+estimate was re-run cold (30 iterations) every sweep — ~1900 matvecs ≈ 2 s of
+hidden cost per $N=1000$ solve. The dominant vector now carries across sweeps
+(the generator changes slowly), cutting warm estimates to 8 iterations. A
+modest underestimate only weakens the cap slightly, inside the
+$\sqrt{3}/\sqrt{2}$ Newton–Schulz headroom. This alone made `gemm` faster
+than `qr` on CPU.
+
+**Newton–Schulz pre-scaling — in core.** $\sigma(I+K)$ spans
+$[1, \sqrt{1+\sigma_c^2}]$ exactly, and the polar factor is scale-invariant,
+so dividing $Y$ by $(1+\sigma_c^2)^{1/4}$ centers the singular values around
+1 before Newton–Schulz. Battery GOE row: 223 → 185 raw gemms (−17%).
+
+**Unshifted-QR prologue (`prologue=k`) — core option, for graded spectra.**
+$k$ steps of $B \leftarrow RQ$ (accumulating $X$) before the first sweep;
+off-diagonals decay like $|\lambda_i/\lambda_j|^k$, each step costs about one
+sweep. Measured on spectrum $2^{-i}$, $N=200$: **45 → 5 sweeps with
+`prologue=3`** (and → 3 with $k=10$), identical accuracy. Useless for flat
+spectra (GOE: 20 → 20), harmless. Not a default because it reintroduces a
+knob; the default stays parameter-free.
+
+**Over-relaxation — dead end, quantified.** $X \leftarrow
+\mathrm{orth}(X(I+\gamma K))$: $\gamma = 1.1$ costs +45% sweeps (20 → 29),
+$\gamma=1.5$ costs 3.4×, $\gamma = 2$ diverges. The saturated angles are not
+conservative — they are already the right step, and *any* uniform
+over-rotation hurts immediately.
+
+**Momentum in generator space — dead end, quantified.** Even with the
+saturations intact and the previous generator parallel-transported to the
+current frame ($P \leftarrow Q^\top K_{\mathrm{eff}} Q$), every $\beta$
+tested slows convergence: $\beta = 0.2/0.3/0.5$ gives 52/67/125 sweeps vs 20.
+Together with the reference's Anderson result, this closes the extrapolation
+family: it is not the *placement* of the extrapolation that was wrong, the
+map simply tolerates no memory. (Consistent with the mixed-precision result —
+memorylessness is exactly what makes the float32 phase safe.)
+
+Reproduce with `python3 experiments_accel.py` (sweep counts, deterministic)
+and the timing snippets in the tables above.
+
 ## GPU (arithmetic and a runnable benchmark, no measurement)
 
 The implementation is backend-agnostic: pass a CuPy array and every operation
@@ -200,22 +260,25 @@ eigensolvers on GPUs are factorization- and memory-bound; the published
 cuSOLVER/MAGMA ratios at $N\gtrsim8$k sit broadly in that range, growing
 with $N$):
 
-- **Cold start: likely still loses or at best breaks even.** ~10.4 raw gemms
-  per sweep × sweeps growing like $\log N$ gives ≈ 470–520 gemms at
-  $N=10$k — above the range unless `syevd` on the target GPU lands at the
-  very top of it. The honest expectation is a loss, closer than on CPU.
+- **Cold start: likely still loses in pure FP64, but `precision="mixed"`
+  changes the arithmetic.** ~10 raw gemms per sweep × sweeps growing like
+  $\log N$ gives ≈ 450–500 FP64 gemms at $N=10$k — above the range unless
+  `syevd` on the target GPU lands at the very top of it. In mixed mode,
+  however, ~90% of those gemms run in float32/TF32 at 8–16× FP64
+  tensor-core throughput: the measured split (~25 FP64 + ~255 float32 gemms
+  at $N=1000$) prices out at ≈ 50–60 FP64-gemm-equivalents — inside the
+  range. Mixed-precision cold start on tensor cores is the one configuration
+  where SSJ could beat cuSOLVER from cold; bench_gpu.py measures it.
 - **Warm-start tracking: the credible win.** 1–5 sweeps ≈ 10–30 raw gemms
   per update is 2–10× under the range, FP64 end to end, with no
   factorization in the loop.
 - **CholeskyQR2 should reverse its CPU verdict** on GPU (its triangular
   kernels are small next to its gemms there), making it the retraction to
   try first for the cold-start case.
-- **Untested upside: mixed precision.** The linear phase needs no accuracy —
-  descent is monotone and each sweep re-derives its angles from a fresh
-  $B$ — so its gemms could run in TF32/FP16 (8–16× FP64 tensor-core
-  throughput) with FP64 reserved for the quadratic tail, compressing the
-  cold-start cost several-fold. The map's self-stabilization is unusually
-  suited to this; nothing here measures it.
+- **Mixed precision is implemented** (`precision="mixed"`, see
+  "Accelerations explored") and validated on CPU at full final accuracy;
+  bench_gpu.py includes the mixed cold-start row. FP16 and TF32 variants of
+  the low phase remain untested.
 
 These are predictions from measured gemm counts plus published GPU ratios,
 not measurements; `bench_gpu.py` exists to replace them with numbers.

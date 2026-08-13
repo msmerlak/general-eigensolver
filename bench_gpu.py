@@ -53,14 +53,20 @@ def bench(n):
     print(f"\nN={n}:  gemm {t_gemm*1e3:8.1f} ms   "
           f"cuSOLVER eigh {t_eigh:7.3f} s  = {t_eigh/t_gemm:6.0f} gemm-equivalents")
 
-    for method in ["gemm", "cholqr2"]:
+    for method, kw in [("gemm", {}), ("cholqr2", {}),
+                       ("gemm", {"precision": "mixed"})]:
         cp.cuda.Stream.null.synchronize()
         t0 = time.perf_counter()
-        w, V, info = ssj_eigh(A, method=method, return_info=True)
+        w, V, info = ssj_eigh(A, method=method, return_info=True, **kw)
         cp.cuda.Stream.null.synchronize()
         dt = time.perf_counter() - t0
-        g = f", {info['gemms']} raw gemms" if method == "gemm" else ""
-        print(f"  SSJ cold  {method:8s}: {info['sweeps']:3d} sweeps, {dt:7.3f} s "
+        label = method + (" mixed" if kw else "")
+        g = ""
+        if method == "gemm":
+            g = f", {info['gemms']} f64 gemms"
+            if "gemms_low" in info:
+                g += f" + {info['gemms_low']} f32 gemms"
+        print(f"  SSJ cold  {label:14s}: {info['sweeps']:3d} sweeps, {dt:7.3f} s "
               f"= {dt/t_gemm:6.0f} gemm-equivalents{g}  "
               f"({'converged' if info['converged'] else 'NOT CONVERGED'})")
 

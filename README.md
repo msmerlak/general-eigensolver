@@ -48,7 +48,7 @@ the natural GPU choice (matmuls and elementwise maps only). `bench_gpu.py`
 measures SSJ against cuSOLVER's `syevd` on your GPU; see BENCHMARKS.md for
 what to expect and why the CPU verdict may reverse there.
 
-### Methods
+### Methods and accelerations
 
 | `method` | retraction | when to use |
 |---|---|---|
@@ -56,6 +56,18 @@ what to expect and why the CPU verdict may reverse there.
 | `"qr"` | Householder QR every sweep | reference / strictest orthogonality path |
 | `"gemm"` | spectral cap ‖K‖₂ ≤ 1 + adaptive Newton–Schulz | hardware where gemm far outruns factorizations; ~2× flops of `"auto"` at the same sweep count, all of them gemms |
 | `"cholqr2"` | CholeskyQR2 (gemm + small triangular ops) | stack-dependent; measured *slower* than QR on our CPU BLAS — see BENCHMARKS.md |
+
+- `precision="mixed"` runs the linear phase in float32 and hands off to
+  float64 for the quadratic tail — full final accuracy, ~1.3–1.4× on CPU,
+  much more on tensor-core GPUs. Safe because the map is memoryless.
+- `prologue=k` runs k unshifted QR-algorithm steps before the first sweep —
+  collapses the sweep count for graded/decaying spectra (measured 45 → 5
+  with `prologue=3`), does nothing for flat spectra.
+- `X0=` warm-starts from a nearby eigenbasis (tracking: 1–5 sweeps).
+
+Measured dead ends (see BENCHMARKS.md): over-relaxation γ·K slows or
+diverges for every γ > 1, and generator-space momentum slows for every β
+tried — the map tolerates no memory and no extra aggressiveness.
 
 ## Repository layout
 
