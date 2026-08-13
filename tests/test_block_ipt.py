@@ -120,6 +120,68 @@ def test_adaptive_capped_block_fails_fast_rather_than_grinding():
     assert not info["converged"] and info["block"] <= 8
 
 
+def _sparse_at(coupling, n=2000, seed=5):
+    import scipy.sparse as sp
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from bench_sparse import sparse_diagonally_dominant
+    A0, d = sparse_diagonally_dominant(n, seed=seed)
+    A = (sp.diags(d) + coupling * (A0 - sp.diags(d))).tocsr()
+    return A, int(np.argmin(np.abs(d - np.median(d))))
+
+
+def test_sparse_block_extends_the_sparse_basin():
+    """The point of the sparse formulation: converge where plain sparse IPT
+    diverges, verified against dense ground truth. Coupling 320 sits at
+    rho ~ 0.38, well past the measured plain-IPT envelope."""
+    from ssj.block_ipt import sparse_block_ipt_eig
+    A, t = _sparse_at(320.0)
+    _, _, plain = ipt_eig_partial(A, [t], return_info=True, hermitian=True,
+                                  max_iter=400)
+    assert not plain["converged"]          # plain IPT genuinely fails here
+
+    lam, v, info = sparse_block_ipt_eig(A, t, return_info=True)
+    assert info["converged"] and info["block"] > 1
+    ev = np.linalg.eigvalsh(np.asarray(A.todense()))
+    scale = np.linalg.norm(np.asarray(A.todense()), 2)
+    assert np.min(np.abs(ev - np.real(lam))) / scale < 1e-11
+    assert np.linalg.norm(A @ v - lam * v) / scale < 1e-9
+
+
+def test_sparse_block_never_forms_a_submatrix():
+    """The dense path builds A[C, C], which is 3.2 GB at n=20000. If this runs
+    in reasonable memory the full-matvec formulation is real."""
+    from ssj.block_ipt import sparse_block_ipt_eig
+    A, t = _sparse_at(1.0, n=20000, seed=1)
+    lam, v, info = sparse_block_ipt_eig(A, t, return_info=True)
+    assert info["converged"]
+    scale = float(np.max(np.abs(A.diagonal()))) + 1.0
+    assert np.linalg.norm(A @ v - lam * v) / scale < 1e-10
+
+
+def test_sparse_block_agrees_with_the_dense_implementation():
+    """Same algorithm, different linear algebra: on a matrix small enough for
+    both, they must find the same eigenvalue."""
+    from ssj.block_ipt import adaptive_block_ipt_eig, sparse_block_ipt_eig
+    A, t = _sparse_at(160.0, n=600, seed=3)
+    Ad = np.asarray(A.todense())
+    lam_s, _, info_s = sparse_block_ipt_eig(A, t, return_info=True)
+    lam_d, _, info_d = adaptive_block_ipt_eig(Ad, t, return_info=True)
+    assert info_s["converged"] and info_d["converged"]
+    scale = np.linalg.norm(Ad, 2)
+    assert abs(np.real(lam_s) - np.real(lam_d)) / scale < 1e-10
+
+
+def test_hopeless_sparse_target_fails_cheaply():
+    """Failure has to be cheap, or escalating before falling back is a net
+    loss -- without the early give-up a hopeless target ran the whole outer
+    budget at the largest block and turned a 1.1 s fallback into 4.9 s."""
+    from ssj.block_ipt import sparse_block_ipt_eig
+    A, t = _sparse_at(3000.0)
+    _, _, info = sparse_block_ipt_eig(A, t, return_info=True, max_outer=100)
+    assert not info["converged"]
+    assert info["iters"] < 60              # gave up well inside the budget
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

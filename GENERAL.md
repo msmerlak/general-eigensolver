@@ -1449,6 +1449,77 @@ ARPACK shift-invert with automatic routing: **184× at $N=2000$, 1,766× at
 $N=5000$**. On a batch where only three of four targets converge it routes
 3 → IPT and 1 → ARPACK and returns all four to 2.8e-16.
 
+## Past the boundary: block IPT for sparse input
+
+The envelope above says the binding constraint is coupling. Block IPT is the
+module that makes the basin *a parameter of the algorithm rather than a
+property of the matrix* — but it was dense-only, and for the reason that
+decides the matter by itself: it forms $A[C,C]$, which at $N=20{,}000$ is
+3.2 GB. The two halves of the repository's best results had never been put
+together.
+
+They compose without approximation. Collect the block identity and the tail
+into one $n \times b$ array, $Y[B,:] = I_b$, $Y[C,:] = X$; then a single
+product with the **full** matrix yields both halves at once,
+
+$$(AY)[C,:] = W_{CB} + W_{CC}X + D_C X, \qquad (AY)[B,:] = A_{BB} + W_{BC}X = H_{\text{eff}},$$
+
+so the inner step is $X \leftarrow ((AY)[C] - d_C X)/(\lambda - d_C)$ and the
+effective Hamiltonian is a $b$-row slice — taken as $A[B,:]\,Y$, which costs
+nothing extra. No submatrix is ever formed; an iteration is $O(\mathrm{nnz}\,b)$
+and memory is $O(nb)$. `sparse_block_ipt_eig`.
+
+It reaches past the plain-IPT boundary, verified against dense ground truth
+($N=2000$, one interior target):
+
+| coupling | $\rho$ | plain IPT | block IPT | block size | eigenvalue error |
+|---|---|---|---|---|---|
+| 20 | 0.024 | converges | converges | 1 | 1.1e-16 |
+| 80 | 0.096 | converges | converges | 1 | 5.6e-14 |
+| 160 | **0.191** | **diverges** | **converges** | 61 | 3.9e-13 |
+| 320 | **0.383** | **diverges** | **converges** | 61 | 2.6e-13 |
+| 640 | 0.765 | diverges | diverges | — | — |
+
+So the usable band roughly quadruples, from $\rho \approx 0.1$ to
+$\rho \approx 0.4$.
+
+### Three findings that were not the obvious direction
+
+**A larger `max_block` is worse.** At $N=2000$, coupling 160: cap 64 converges
+in 44 outer iterations and 0.73 s, cap 125 in 76 and 2.65 s, and cap 200
+*fails to converge at all*. The growth trigger is aggressive by design, so a
+permissive cap lets the block keep growing — each promotion costs iterations,
+discards the warm start, and makes every later iteration more expensive —
+rather than settling down and converging at the block it already has. The cap
+is what forces it to settle. Default 64.
+
+**Block IPT must come second, never first.** It pays for its basin on every
+problem including the ones that never needed it: at $N=5000$, $\rho = 0.134$,
+plain IPT converges in 5 iterations and 11 ms while the block version grows to
+$b=61$ and takes 1.66 s — **150× slower for the same answer**, because the
+growth trigger fires on merely-slow progress rather than real stalling. So
+`eig_partial` escalates only on the targets plain IPT actually failed.
+
+**Escalating is only worth it when the fallback is expensive**, and that is a
+size test. A block attempt is *linear* in $N$; the shift-invert fallback grows
+roughly like $N^{3.5}$ as fill-in worsens (1.1 s at $N$=2000, 16 s at 5000,
+142 s at 10,000). End to end on three targets:
+
+| | coupling 160 | coupling 320 |
+|---|---|---|
+| $N = 2000$ | 1.30× | **0.27×** (a loss) |
+| $N = 5000$ | **53.7×** | **25.9×** |
+
+Hence a size-aware default. Failure also had to be made cheap for this to pay:
+without an early give-up once growing is exhausted and the error has stopped
+improving, a hopeless target ran the full outer budget at the largest block
+and turned a 1.1 s fallback into a 4.9 s round trip.
+
+One honest caveat: block IPT converges on the eigenvalue's relative change and
+returns residuals near 1e-10, against ~1e-15 from the factorizing fallback.
+Ample for most uses, and the price of not factorizing — but callers who need
+the last digits should pass `escalate=False`.
+
 **Detecting divergence promptly.** A blow-up test ($\|\Delta V\| > 10^3\times$
 its initial value) is a poor detector for a contraction factor just above 1:
 the error creeps rather than explodes, which is what made that row take 763

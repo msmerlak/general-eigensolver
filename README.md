@@ -94,6 +94,18 @@ other diverges at ρ = 0.096. Cost also degrades well before correctness does
 (3–6 iterations at ρ ≲ 0.02, 20+ near the edge), and divergence can be slow
 enough that a tight `max_iter` misreports slow convergence as failure.
 
+Past that coupling boundary, **`sparse_block_ipt_eig`** solves the block
+fixed point without ever forming a submatrix (the dense path builds `A[C,C]`,
+3.2 GB at N=20,000; putting the block identity and the tail in one n×b array
+makes one full matvec yield both halves). It roughly quadruples the usable
+band — converging at ρ = 0.38 where plain IPT diverges — and `eig_partial`
+escalates to it automatically on just the targets that failed, when the size
+makes it worth it: **26–54× at N=5000**, versus 0.27–1.3× at N=2000, because
+a block attempt is linear in N while the shift-invert fallback is not. Three
+counterintuitive details (a *larger* block cap is worse; block IPT is 150×
+slower than plain IPT when plain IPT would have worked; failure must be made
+cheap or escalating is a net loss) are measured in [GENERAL.md](GENERAL.md).
+
 `window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
 purification (matmul only, no factorization, no target guess) with a
 *certified* count — unlike ARPACK shift-invert, which needs `k` guessed up

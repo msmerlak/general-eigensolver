@@ -109,8 +109,61 @@ def _auto_gate(A):
     return np.inf if _issparse(A) else 0.1
 
 
+def _should_escalate(A):
+    """Escalate to block IPT only where the fallback it avoids is expensive.
+
+    See `_escalate_block` for the measurements: the block rung is linear in N
+    and the shift-invert fallback is not, so this is a size test. 5000 sits
+    just past the measured crossover (0.27-1.3x at N=2000, 26-54x at N=5000).
+    """
+    return _issparse(A) and A.shape[0] >= 5000
+
+
+def _escalate_block(A, cols, tol, max_block):
+    """Second rung: adaptive block IPT on the targets plain IPT could not do.
+
+    Worth trying only AFTER plain IPT has failed, never instead of it, and
+    only when the fallback it is trying to avoid is expensive. A block attempt
+    costs O(max_outer x inner x nnz x b), i.e. LINEAR in N, while the
+    shift-invert fallback grows roughly like N^3.5 as fill-in worsens (1.1 s
+    at N=2000, 16 s at 5000, 142 s at 10,000 -- measured). So escalating is a
+    loss on small problems and a large win on big ones, and the crossover is
+    between those first two sizes. Measured end to end, three targets:
+
+        N=2000, coupling 160 -> 1.30x     N=5000, coupling 160 -> 53.7x
+        N=2000, coupling 320 -> 0.27x     N=5000, coupling 320 -> 25.9x
+
+    Hence the size-aware default (`_should_escalate`). Note the accuracy is
+    not identical: block IPT converges on the eigenvalue's relative change and
+    returns residuals near 1e-10, against ~1e-15 from the fallback. That is
+    ample for most uses and is the price of not factorizing, but it is a real
+    difference and callers who need the last digits should skip the rung.
+
+    The reason it must come second rather than replace plain IPT is that the
+    block version pays for its larger basin on every problem, including the
+    ones that never needed it: at N=5000, rho=0.134, plain IPT converges in
+    5 iterations and 11 ms while the block version grows to b=61 and takes
+    1.66 s -- 150x slower for the same answer, because the growth trigger
+    fires on merely-slow progress rather than on real stalling. Escalating
+    only on failure keeps the cheap case cheap and still buys the basin:
+    measured convergence at rho = 0.38 where plain IPT diverges, at 1.5x
+    (N=2000) and 9.7x (N=5000) against ARPACK shift-invert, with the margin
+    growing in N because the fallback's fill-in does.
+    """
+    from .block_ipt import sparse_block_ipt_eig
+    out = {}
+    for c in cols:
+        lam, v, info = sparse_block_ipt_eig(A, int(c), tol=max(tol, 1e-12),
+                                            max_block=max_block,
+                                            return_info=True)
+        if info["converged"]:
+            out[int(c)] = (lam, v)
+    return out
+
+
 def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
-                max_iter=200, force=None, return_info=False):
+                max_iter=200, force=None, return_info=False,
+                escalate=None, max_block=64):
     """k targeted eigenpairs, routed per target to the cheapest correct solver.
 
     Parameters
@@ -127,6 +180,11 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
         measurements. Pass a float to override.
     force : None (route automatically), "ipt", or "arpack" -- for benchmarking
         and for callers who know their input.
+    escalate : sparse only. Targets plain IPT fails on get one attempt at
+        adaptive block IPT before the factorization is paid for. Tried only
+        AFTER plain IPT fails, never instead of it. None (default) enables it
+        by size, where it is measurably worth it -- see `_escalate_block`.
+    max_block : cap for that escalation; larger is measurably worse.
 
     Returns (w, V), or (w, V, info) with info["path"] one of "ipt",
     "arpack", "mixed", info["rates"] the per-column rates, and info["n_ipt"] /
@@ -146,6 +204,7 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
     k = len(cols)
     if gate is None:
         gate = _auto_gate(A)
+    esc = _should_escalate(A) if escalate is None else (escalate and _issparse(A))
 
     rates = ipt_rate_columns(A, cols)          # O(N k), the whole routing cost
     if force == "ipt":
@@ -157,6 +216,7 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
 
     w = np.zeros(k, dtype=np.complex128)
     V = np.zeros((n, k), dtype=np.complex128)
+    n_block = 0
 
     if use_ipt.any():
         sel = cols[use_ipt]
@@ -175,6 +235,17 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
         w[idx[ok]] = wi[ok]
         V[:, idx[ok]] = Vi[:, ok]
         use_ipt[idx[~ok]] = False
+
+        # Second rung, sparse only: the targets plain IPT could not do get one
+        # attempt at adaptive block IPT before the factorization is paid for.
+        if esc and (~ok).any():
+            got = _escalate_block(A, cols[idx[~ok]], tol, max_block)
+            for pos, c in zip(idx[~ok], cols[idx[~ok]]):
+                if int(c) in got:
+                    lam, v = got[int(c)]
+                    w[pos], V[:, pos] = lam, v
+                    use_ipt[pos] = True
+                    n_block += 1
 
     if (~use_ipt).any():
         rest = cols[~use_ipt]
@@ -195,5 +266,6 @@ def eig_partial(A, cols=None, sigma=None, k=None, gate=None, tol=1e-13,
     path = "ipt" if n_ipt == k else ("arpack" if n_ipt == 0 else "mixed")
     if return_info:
         return w, V, {"path": path, "rates": rates, "n_ipt": n_ipt,
-                      "n_arpack": k - n_ipt, "cols": cols}
+                      "n_arpack": k - n_ipt, "n_block": n_block,
+                      "cols": cols}
     return w, V

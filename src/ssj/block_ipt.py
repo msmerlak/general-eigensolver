@@ -40,7 +40,145 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["block_ipt_eig", "adaptive_block_ipt_eig", "choose_block"]
+__all__ = ["block_ipt_eig", "adaptive_block_ipt_eig", "choose_block",
+           "sparse_block_ipt_eig"]
+
+
+def _issparse(A):
+    return hasattr(A, "tocsr") and hasattr(A, "nnz")
+
+
+def sparse_block_ipt_eig(A, target, b0=1, max_block=64, grow=4, tol=1e-12,
+                         max_outer=100, inner=3, stall=0.5, patience=8,
+                         return_info=False):
+    """Adaptive block IPT for SPARSE A, without ever forming a submatrix.
+
+    The dense implementation builds A[C, C], which is (n-b)-by-(n-b) and
+    settles the question for large sparse input by itself: at n = 20,000 that
+    is 3.2 GB. But the algorithm never needs the submatrices separately. Put
+    the block-identity and the tail into one n-by-b array,
+
+        Y[B, :] = I_b,     Y[C, :] = X,
+
+    and a single product with the FULL matrix yields both halves at once:
+
+        (A Y)[C, :] = W_CB + W_CC X + D_C X        -> the inner update
+        (A Y)[B, :] = A_BB + W_BC X = H_eff        -> the exact b-by-b problem
+
+    so the inner iteration is X <- ((A Y)[C] - d_C X) / (lambda - d_C) and the
+    effective Hamiltonian is a b-row slice. Cost per inner step is one sparse
+    matvec block, O(nnz b); memory is O(n b). H_eff is taken as A[B, :] @ Y,
+    a b-row slice of A, so it costs nothing extra rather than a second pass.
+
+    This is the combination the rest of the module and bench_sparse.py each
+    have half of: the block gives a basin that is a parameter rather than a
+    property of the matrix, and the sparse formulation keeps an iteration at
+    O(nnz). The measured envelope of plain sparse IPT ends near rho ~ 0.05-0.25
+    (GENERAL.md); this is the method for the other side of that boundary.
+
+    `max_block` defaults to 64, and a LARGER cap is measurably worse, which is
+    not the obvious direction. At N=2000, coupling 160: cap 64 converges in 44
+    outer iterations and 0.73 s, cap 125 in 76 and 2.65 s, and cap 200 fails to
+    converge at all within the outer budget. The growth trigger (`stall`=0.5)
+    is aggressive by design, so a permissive cap lets the block keep growing --
+    each promotion costs iterations, discards the warm start, and makes every
+    subsequent iteration more expensive -- instead of settling down and
+    converging at the block it already has. The cap is what forces it to
+    settle. Raise it only if convergence fails at the default.
+
+    Returns (lambda, v) or (..., info) with info["block"], info["grew"].
+    """
+    import scipy.sparse as sp
+    A = A.tocsr()
+    n = A.shape[0]
+    d = np.asarray(A.diagonal()).ravel()
+    cdt = np.result_type(A.dtype, np.complex128)
+
+    B = choose_block(A, target, None, max(b0, 1), by="ratio")
+    lam = complex(d[target])
+    v_B = np.ones(1, dtype=cdt)
+    # The eigenvector pieces must stay paired with the block they were solved
+    # for: B can grow on the very last outer iteration, leaving v_B and X
+    # sized for the previous block.
+    B_v, X_v = B, None
+    X = None
+    converged = False
+    grew = 0
+    prev_err = np.inf
+    best, since_best = np.inf, 0
+    outer = 0
+
+    for outer in range(1, max_outer + 1):
+        mask = np.ones(n, dtype=bool)
+        mask[B] = False
+        C = np.flatnonzero(mask)
+        b = len(B)
+        d_C = d[C]
+
+        Y = np.zeros((n, b), dtype=cdt)
+        Y[B, np.arange(b)] = 1.0
+        if X is not None and X.shape == (len(C), b):
+            Y[C] = X                        # warm start when shapes allow
+        AC = A[C]                           # rows C once per block change
+        AB = A[B]                           # b rows: H_eff comes from these
+
+        for _ in range(inner):
+            AY = AC @ Y                     # O(nnz b), no submatrix formed
+            X = (AY - d_C[:, None] * Y[C]) / (lam - d_C)[:, None]
+            Y[C] = X
+
+        H_eff = np.asarray((AB @ Y))
+        w_eff, V_eff = np.linalg.eig(H_eff)
+        m = int(np.argmin(np.abs(w_eff - lam)))
+        lam_new, v_B = w_eff[m], V_eff[:, m]
+        B_v, X_v = B, X
+
+        err = abs(lam_new - lam) / max(abs(lam_new), 1e-300)
+        lam = lam_new
+        if err <= tol:
+            converged = True
+            break
+        if not np.isfinite(err):
+            break
+
+        # Stalled? Promote the tail indices whose "small correction" is not
+        # small -- the iterate shows which they are, no prediction needed.
+        if err > stall * prev_err and b + grow <= max_block:
+            amp = np.abs(X @ v_B)
+            B = np.sort(np.union1d(B, C[np.argsort(-amp)[:grow]]))
+            grew += 1
+            prev_err = np.inf
+            best, since_best = np.inf, 0
+            X = None                        # shapes changed
+            continue
+        prev_err = max(err, 1e-300)
+
+        # Give up early once growing is no longer available and the error has
+        # stopped improving. Without this a hopeless target runs the whole
+        # outer budget at the largest block, which is the most expensive thing
+        # this module can do: in the escalation ladder it turned a 1.1 s
+        # ARPACK fallback into a 4.9 s round trip. Failure has to be cheap for
+        # escalating-before-falling-back to be worth it at all.
+        if err < best * (1.0 - 1e-3):
+            best, since_best = err, 0
+        else:
+            since_best += 1
+            if since_best >= patience and b + grow > max_block:
+                break
+
+    v = np.zeros(n, dtype=cdt)
+    v[B_v] = v_B
+    if X_v is not None and X_v.shape[1] == len(B_v):
+        mask = np.ones(n, dtype=bool)
+        mask[B_v] = False
+        v[mask] = X_v @ v_B
+    nv = np.linalg.norm(v)
+    if nv > 0:
+        v /= nv
+    if return_info:
+        return lam, v, {"converged": converged, "iters": outer,
+                        "block": len(B_v), "grew": grew}
+    return lam, v
 
 
 def choose_block(A, target, tau=None, max_block=64, by="ratio"):
@@ -64,8 +202,12 @@ def choose_block(A, target, tau=None, max_block=64, by="ratio"):
         keep = idx[:max_block] if tau is None else \
             idx[gaps[idx] <= tau][:max_block]
     else:
-        col = np.abs(np.asarray(A[:, target]).ravel())
-        row = np.abs(np.asarray(A[target, :]).ravel())
+        if _issparse(A):
+            col = np.abs(np.asarray(A.tocsc()[:, target].todense()).ravel())
+            row = np.abs(np.asarray(A.tocsr()[target, :].todense()).ravel())
+        else:
+            col = np.abs(np.asarray(A[:, target]).ravel())
+            row = np.abs(np.asarray(A[target, :]).ravel())
         coupling = np.maximum(col, row)
         with np.errstate(divide="ignore", invalid="ignore"):
             ratio = np.where(gaps > 0, coupling / np.where(gaps > 0, gaps, 1.0),
