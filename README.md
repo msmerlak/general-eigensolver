@@ -55,6 +55,15 @@ time, never correctness — unconverged IPT output is discarded and the target
 re-run on ARPACK. Measured: 6.4–9.1× on isolated targets, and 0.0% overhead
 when nothing qualifies. See [GENERAL.md](GENERAL.md).
 
+`window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
+purification (matmul only, no factorization, no target guess) with a
+*certified* count — unlike ARPACK shift-invert, which needs `k` guessed up
+front and silently returns fewer than the true count if you guess low
+(measured: guessing half the true count returns exactly that many, with no
+warning that any were missed). Not fast (6–7× slower than ARPACK even when
+handed the true count, and `precision="mixed"` only helps past N~800) — use
+it when the count must be right, not merely fast.
+
 For the hard remainder — dense, non-normal, far from diagonal — `sdc_eigvals`
 (spectral divide and conquer via the matrix sign function) solves it to 1e-13
 with no basin condition, though at 0.13–0.22× of `dgeev` on this CPU. GENERAL.md

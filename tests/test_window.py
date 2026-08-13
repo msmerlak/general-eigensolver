@@ -72,6 +72,19 @@ def test_window_count_matches_dense_diagonalization_broadly():
         assert window_count(A, lo, hi) == true
 
 
+
+
+def test_mixed_precision_matches_full_precision():
+    A = goe(250, seed=7)
+    ev = np.linalg.eigvalsh(A)
+    lo, hi = np.quantile(ev, [0.3, 0.7])
+    w1, V1, i1 = window_eig(A, lo, hi, precision="full", return_info=True)
+    w2, V2, i2 = window_eig(A, lo, hi, precision="mixed", return_info=True)
+    assert i1["count"] == i2["count"]
+    scale = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w1) - np.sort(w2))) / scale < 1e-9
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

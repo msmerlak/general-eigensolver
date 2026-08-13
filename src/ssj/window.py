@@ -47,7 +47,7 @@ from .purify import _bounds, spectral_projector
 __all__ = ["window_eig", "window_count"]
 
 
-def window_count(A, lo, hi, tol=1e-11, bounds=None):
+def window_count(A, lo, hi, tol=1e-11, bounds=None, precision="full"):
     """Number of eigenvalues in [lo, hi], via two purifications and a trace.
 
     Cheaper than window_eig when only the count is wanted: no QR, no
@@ -55,12 +55,12 @@ def window_count(A, lo, hi, tol=1e-11, bounds=None):
     """
     A = np.asarray(A)
     bounds = bounds if bounds is not None else _bounds(A)
-    P_hi, _ = spectral_projector(A, hi, tol=tol, bounds=bounds)
-    P_lo, _ = spectral_projector(A, lo, tol=tol, bounds=bounds)
+    P_hi, _ = spectral_projector(A, hi, tol=tol, bounds=bounds, precision=precision)
+    P_lo, _ = spectral_projector(A, lo, tol=tol, bounds=bounds, precision=precision)
     return int(np.rint(np.trace(P_hi - P_lo).real))
 
 
-def window_eig(A, lo, hi, tol=1e-11, return_info=False):
+def window_eig(A, lo, hi, tol=1e-11, precision="full", return_info=False):
     """All eigenpairs of Hermitian A with eigenvalue in [lo, hi].
 
     Returns (w, V) with w ascending and V's columns orthonormal eigenvectors,
@@ -71,6 +71,11 @@ def window_eig(A, lo, hi, tol=1e-11, return_info=False):
     Boundary note: if lo or hi lands exactly ON an eigenvalue the split is
     ambiguous by construction (true of any spectral-projector method, not a
     defect here) -- nudge the boundary if a specific inclusion is required.
+
+    precision="mixed" runs each projector's early sweeps in float32 (see
+    ssj.purify.purify); measured 0.91x at N=400 (overhead dominates) rising to
+    1.73x at N=800, with identical certified counts throughout. Worth it once
+    N is a few hundred or more, not below.
     """
     from scipy.linalg import qr as _qr
 
@@ -79,8 +84,8 @@ def window_eig(A, lo, hi, tol=1e-11, return_info=False):
     if lo > hi:
         lo, hi = hi, lo
     bounds = _bounds(A)
-    P_hi, _ = spectral_projector(A, hi, tol=tol, bounds=bounds)
-    P_lo, _ = spectral_projector(A, lo, tol=tol, bounds=bounds)
+    P_hi, _ = spectral_projector(A, hi, tol=tol, bounds=bounds, precision=precision)
+    P_lo, _ = spectral_projector(A, lo, tol=tol, bounds=bounds, precision=precision)
     Pw = P_hi - P_lo
     idem_resid = float(np.linalg.norm(Pw @ Pw - Pw, "fro"))
     r = int(np.rint(np.trace(Pw).real))

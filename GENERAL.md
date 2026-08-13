@@ -1081,3 +1081,59 @@ This confirms rather than contradicts the earlier single-split finding
 `dsyevd` at 15–18 gemm-equivalents undercuts both) — not shipped as a new
 module since it duplicates a result already established, but worth recording
 that the full assembly was actually built and measured, not inferred.
+
+
+## Two more, both from this same campaign
+
+**Mixed precision for purification: shipped, modest and size-dependent.**
+`spectral_projector`/`window_eig` now take `precision="mixed"`, running early
+sweeps in float32 (same memoryless mechanism as SSJ's mixed precision — each
+iteration recomputes $P^2$ from the *current* $P$, so low precision can only
+degrade the warm start, never the final answer). Measured on the raw
+projector: 1.43–1.45× at $N=600/1200$, identical rank and idempotency.
+End-to-end inside `window_eig` the win is size-dependent — **0.91×** (slightly
+slower) at $N=400$, **1.73×** at $N=800$ — because float32's advantage is a
+constant-factor cubic effect while per-call overhead is fixed; small problems
+don't clear that bar. Worth it past a few hundred, not below.
+
+**Chebyshev-filtered subspace iteration: explored, and a self-correction.**
+Polynomial filtering (apply a Jackson-damped Chebyshev approximation to the
+window indicator, matvec-only, no matrix squaring) looked like it might beat
+purification outright — an early measurement showed 4–6.5× faster at matched
+block size and degree. That measurement was comparing at *mismatched*
+accuracy. Two real bugs surfaced in getting there, both worth recording:
+
+1. Naive spectral-bound estimation matters enormously. Gershgorin bounds were
+   measured $6.8\times$ wider than the true spectral range on GOE, squeezing
+   the window into 1.15% of the mapped $[-1,1]$ interval — far beyond what a
+   degree-30 polynomial can resolve, which is what caused the *first* failure
+   (0 eigenvalues found, looked like the whole idea was broken).
+2. Plain power iteration for tight bounds has its own trap: it converges to
+   the eigenvalue of *largest magnitude*, not the algebraic max, so on a
+   symmetric-around-zero spectrum like GOE both `power(A)` and `power(-A)`
+   converged to the *same* (most negative) eigenvalue, collapsing the
+   estimated range to a near-empty sliver. Lanczos (a small Krylov subspace,
+   reading both extremes off its tridiagonal projection) fixes this reliably.
+
+With both bugs fixed, the filter does resolve the window — but only slowly
+near the boundary. Median residual for in-window states drops nicely with
+more refinement passes; the *maximum* residual (boundary states) stays stuck
+around $10^{-2}$ for many iterations, because the filter's response is a
+smooth, moderate-slope function there, not a sharp cutoff. Reaching residuals
+comparable to purification's needs degree $\approx150$ and 5–6 refinement
+passes. At that *matched* accuracy:
+
+| $N$ | Chebyshev (matched) | purification | ratio |
+|---|---|---|---|
+| 400 | 0.371 s, found 40/40, err 3.5e-11 | 0.221 s, found 40/40 | **0.60×** |
+| 800 | 1.689 s, **found 7/80** | 1.270 s, found 80/80 | **0.75× (and wrong)** |
+
+**Not shipped.** At $N=800$ the "matched" settings that worked at $N=400$
+undercounted catastrophically — exactly the silent-miss failure mode this
+whole module exists to eliminate, and worse than the honest 0.6× at $N=400$.
+A production version would need adaptive degree/block-size selection to be
+trustworthy, which would very likely erode the constant-factor advantage
+further rather than recover it. The corrected conclusion: purification's
+specific fixed-point structure (superattracting away from its one repelling
+point) gives predictable, reliable convergence that a moderate-degree
+polynomial filter does not match without cost approaching or exceeding it.
