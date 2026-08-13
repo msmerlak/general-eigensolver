@@ -690,3 +690,44 @@ alone. On a 2D Anderson lattice the gap criterion converges at disorder 40
 where the ratio criterion does not, and the ordering reverses at disorder 80.
 No block criterion tested reaches the strongly resonant lattice regime
 ($W \lesssim 20$), where multi-hop resonances defeat all of them.
+
+
+## Adaptive blocks: let the iterate choose
+
+Both a priori block criteria proved unreliable, so stop predicting and let the
+iterate report. A large tail amplitude $|X_i|$ *is* the statement that index
+$i$'s "small correction" is not small — the empirical signal that it should
+have been solved exactly. `adaptive_block_ipt_eig` starts at $b=1$ and
+promotes the largest-amplitude indices out of $C$ whenever contraction is
+slow, re-selecting against the **current** $\lambda$ rather than the initial
+$d_j$ (the resonant set moves as the eigenvalue converges).
+
+**The growth trigger matters more than it looks.** Growing only when truly
+stalled is too permissive: the iteration settles for a slow linear rate and
+runs out of iterations instead of buying a better rate with a bigger block.
+Measured at coupling 8 — trigger 0.9 stops at $b=37$ and fails; trigger 0.5
+grows to $b=93$ and converges. The default says *grow until convergence is
+fast*, which is right because iterations cost $O(N^2b)$ either way.
+
+Dense near-diagonal, $N=400$:
+
+| coupling | plain IPT | static $b{=}32$ | **adaptive** | vs `dgeev` |
+|---|---|---|---|---|
+| 0.5 | converges | converges | **$b{=}1$**, 20 ms | **4.8×** |
+| 2 | diverges | converges | **$b{=}5$**, 48 ms | **2.1×** |
+| 8 | diverges | converges | $b{=}125$, 1445 ms | 0.1× |
+| 20 | diverges | **diverges** | $b{=}125$, 1616 ms | 0.1× |
+| 50 | diverges | **diverges** | $b{=}125$, 3474 ms | 0.0× |
+
+Two things to read off. Adaptive **dominates the static version**: it picks
+$b=1$ when $b=1$ suffices, so easy problems cost what plain IPT costs, and it
+converges at coupling 20–50 where every static block tested diverges — a
+**100× wider basin** than plain IPT. And the basin extension is
+*economically* useful only out to coupling $\approx 2$; past that the block
+needed is so large that calling `dgeev` is cheaper.
+
+**Operating rule.** Run adaptive with `max_block` capped around 8–16. Inside
+the profitable band it is parameter-free and 2–5× faster than LAPACK; outside,
+it gives up cheaply (the cap bounds the cost) and the caller falls back. That
+converts the earlier "guess the block size" into no parameter at all, which is
+what makes it usable in the `eig_partial` router.

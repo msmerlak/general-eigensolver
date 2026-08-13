@@ -40,7 +40,7 @@ from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["block_ipt_eig", "choose_block"]
+__all__ = ["block_ipt_eig", "adaptive_block_ipt_eig", "choose_block"]
 
 
 def choose_block(A, target, tau=None, max_block=64, by="ratio"):
@@ -158,4 +158,110 @@ def block_ipt_eig(A, target, tau=None, max_block=32, tol=1e-13,
                             np.maximum(np.abs(lam - d_C), 1e-300)))
         return lam, v, {"converged": converged, "iters": it, "block": b,
                         "rate": rate}
+    return lam, v
+
+
+def adaptive_block_ipt_eig(A, target, b0=1, max_block=128, grow=4, tol=1e-13,
+                           max_outer=150, inner=3, stall=0.5, return_info=False):
+    """Block IPT that discovers its own block from the iterate.
+
+    Both a priori block criteria are unreliable: selecting by gap and selecting
+    by |W_ij|/|gap| each win on some problems and lose on others (measured in
+    GENERAL.md), because both predict trouble from the matrix alone. The
+    iterate does better than predicting -- it SHOWS which indices are failing,
+    as a large tail amplitude |X_i|. An index with a large amplitude is
+    precisely one whose "small correction" is not small, i.e. one that should
+    have been solved exactly rather than perturbatively.
+
+    So: start from a block of size b0 (1 = plain IPT), iterate, and whenever
+    the contraction stalls, promote the `grow` largest-amplitude indices out of
+    C and into B. Two things improve over the static version:
+
+      * the block is re-selected against the CURRENT lambda, not the initial
+        d[target] -- the resonant set moves as the eigenvalue converges;
+      * cost is proportional to the block actually needed, rather than to a
+        guessed max_block, so easy problems stay cheap.
+
+    `stall` is the growth trigger and matters more than it looks: it is the
+    contraction rate above which the block grows. Setting it near 1 (grow only
+    when truly stuck) is measurably too permissive -- the iteration then
+    settles for a slow linear rate and runs out of iterations rather than
+    buying a better rate with a bigger block. Measured at coupling 8: stall=0.9
+    stops at b=37 and fails, stall=0.5 grows to b=93 and converges. The default
+    0.5 says "grow until convergence is fast", which is the right trade because
+    iterations cost O(N^2 b) either way.
+
+    Returns (lambda, v) or (..., info) with info["block"] the final block size
+    and info["grew"] the number of promotions.
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    d = np.diag(A).copy()
+    cdt = np.result_type(A.dtype, np.complex128)
+
+    B = choose_block(A, target, None, max(b0, 1), by="ratio")
+    lam = complex(d[target])
+    v_B = None
+    X_full = np.zeros((n, 1), dtype=cdt)   # tail amplitudes, full-length rows
+    converged = False
+    grew = 0
+    prev_err = np.inf
+    outer = 0
+
+    for outer in range(1, max_outer + 1):
+        mask = np.ones(n, dtype=bool)
+        mask[B] = False
+        C = np.where(mask)[0]
+        b = len(B)
+
+        A_BB = A[np.ix_(B, B)]
+        W_CB = A[np.ix_(C, B)]
+        W_BC = A[np.ix_(B, C)]
+        d_C = d[C]
+        W_CC = A[np.ix_(C, C)] - np.diag(d_C)
+
+        X = np.zeros((len(C), b), dtype=cdt)
+        if X_full.shape[1] == b:
+            X = X_full[C].copy()            # warm start when shape allows
+
+        for _ in range(inner):
+            X = (W_CB + W_CC @ X) / (lam - d_C)[:, None]
+
+        H_eff = A_BB + W_BC @ X
+        w_eff, V_eff = np.linalg.eig(H_eff)
+        m = int(np.argmin(np.abs(w_eff - lam)))
+        lam_new, v_B = w_eff[m], V_eff[:, m]
+
+        err = abs(lam_new - lam) / max(abs(lam_new), 1e-300)
+        lam = lam_new
+        X_full = np.zeros((n, b), dtype=cdt)
+        X_full[C] = X
+
+        if err <= tol:
+            converged = True
+            break
+
+        # Stalled (or diverging)? Promote the worst-behaved tail indices.
+        if err > stall * prev_err and b + grow <= max_block:
+            amp = np.abs(X @ v_B) if v_B is not None else np.abs(X[:, 0])
+            worst = C[np.argsort(-amp)[:grow]]
+            B = np.sort(np.union1d(B, worst))
+            grew += 1
+            prev_err = np.inf
+            X_full = np.zeros((n, 1), dtype=cdt)   # shapes changed
+            continue
+        prev_err = max(err, 1e-300)
+
+    v = np.zeros(n, dtype=cdt)
+    v[B] = v_B
+    mask = np.ones(n, dtype=bool)
+    mask[B] = False
+    v[mask] = (X_full[mask] @ v_B) if X_full.shape[1] == len(B) else 0.0
+    nv = np.linalg.norm(v)
+    if nv > 0:
+        v /= nv
+
+    if return_info:
+        return lam, v, {"converged": converged, "iters": outer,
+                        "block": len(B), "grew": grew}
     return lam, v

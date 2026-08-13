@@ -78,3 +78,49 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} tests passed")
+
+
+def test_adaptive_stays_cheap_when_the_problem_is_easy():
+    """The point of adapting: use b=1 when b=1 suffices, so easy problems cost
+    what plain IPT costs instead of what a guessed block costs."""
+    from ssj.block_ipt import adaptive_block_ipt_eig
+    A = near_diagonal(300, 0.3)
+    lam, v, info = adaptive_block_ipt_eig(A, 150, return_info=True)
+    assert info["converged"] and info["block"] <= 2 and info["grew"] == 0
+    exact = np.linalg.eigvals(A)
+    assert np.min(np.abs(exact - lam)) / np.linalg.norm(A, 2) < 1e-12
+
+
+def test_adaptive_grows_only_as_needed():
+    from ssj.block_ipt import adaptive_block_ipt_eig
+    easy = adaptive_block_ipt_eig(near_diagonal(300, 0.3), 150,
+                                  return_info=True)[2]
+    hard = adaptive_block_ipt_eig(near_diagonal(300, 2.0), 150,
+                                  return_info=True)[2]
+    assert hard["block"] > easy["block"]
+    assert hard["converged"]
+
+
+def test_adaptive_reaches_beyond_the_static_basin():
+    """Adaptive converges where a static block of the same cap diverges,
+    because it re-selects against the CURRENT lambda."""
+    from ssj.block_ipt import adaptive_block_ipt_eig
+    n, tgt = 300, 150
+    A = near_diagonal(n, 8.0)
+    static = block_ipt_eig(A, tgt, max_block=8, by="gap", return_info=True)[2]
+    lam, v, ad = adaptive_block_ipt_eig(A, tgt, max_block=128,
+                                        return_info=True)
+    assert not static["converged"]
+    assert ad["converged"]
+    exact = np.linalg.eigvals(A)
+    assert np.min(np.abs(exact - lam)) / np.linalg.norm(A, 2) < 1e-10
+
+
+def test_adaptive_capped_block_fails_fast_rather_than_grinding():
+    """With max_block capped for cost, a hopeless problem must give up
+    cheaply so a caller can fall back, not spend the whole budget."""
+    from ssj.block_ipt import adaptive_block_ipt_eig
+    A = near_diagonal(300, 50.0)
+    lam, v, info = adaptive_block_ipt_eig(A, 150, max_block=8, max_outer=40,
+                                          return_info=True)
+    assert not info["converged"] and info["block"] <= 8
