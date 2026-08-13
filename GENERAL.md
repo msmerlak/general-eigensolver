@@ -926,3 +926,42 @@ threshold reported divergence on runs that had reached machine precision
 (measured eigenvalue error 9.4e-17 on a "failed" run). Both were harness bugs
 masquerading as negative results, which is the failure mode this whole survey
 is most exposed to.
+
+
+## Taking Davidson further: where it stops
+
+Davidson's wider basin looked like the way to extend this repository's best
+result — `ipt_eig_partial` beats ARPACK shift-invert by 4–123× on interior
+targets but only inside IPT's basin, and outside it the router pays for the
+O(N³) factorization the whole approach exists to avoid. Davidson keeps the
+factorization-free property with a 16× wider basin, so it should widen the
+niche. It does not, and the reason corrects my account of why IPT won.
+
+$k=4$ interior targets, $N=400$:
+
+| coupling | IPT partial | $k\times$ Davidson | ARPACK | **D vs ARPACK** |
+|---|---|---|---|---|
+| 0.5 | 15 its, **3 ms** | 52 its, 95 ms | 9.2 ms | **0.10×** |
+| 2 | 149 its, 17 ms | 163 its, 155 ms | 7.3 ms | **0.05×** |
+| 8 | **diverges** | 465 its, 561 ms | 7.1 ms | **0.01×** |
+| 30 | diverges | diverges | 9.0 ms | — |
+
+Davidson does reach coupling 8 where IPT dies — the basin claim holds — but at
+10–100× the cost of simply calling ARPACK.
+
+**So the partial solver's advantage was never "no factorization".** It was
+IPT's *iteration count*: 5–15 matvecs, total. ARPACK's shift-invert
+factorization is O(N³/3), which at N=400 is perfectly affordable and buys very
+fast Krylov convergence; beating it requires finishing in a handful of
+matvecs, not merely avoiding a factorization. Davidson needs 50–500, each
+O(N²), and that is enough to lose outright.
+
+A block Davidson was also written and discarded rather than shipped: it failed
+at coupling 2 where the single-vector version converges, and was already 0.3×
+ARPACK where it did work — two independent reasons not to keep it.
+
+The honest boundary of the whole partial-solver result is therefore narrower
+than the basin discussion suggests. It is not "wherever a factorization is
+expensive"; it is **wherever IPT converges in a handful of iterations**, which
+is the near-diagonal regime the per-column screen already identifies, and the
+existing router already handles correctly.
