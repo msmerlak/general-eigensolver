@@ -42,8 +42,8 @@ import numpy as np
 
 from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 
-__all__ = ["ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate", "ssj_ipt_eigh",
-           "refine_eig"]
+__all__ = ["ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate",
+           "ipt_rate_columns", "ssj_ipt_eigh", "refine_eig"]
 
 
 def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
@@ -468,3 +468,34 @@ def ipt_eig_partial(A, cols, tol=1e-13, max_iter=200, return_info=False,
         return Lam, V, {"iters": it, "converged": converged, "err": err,
                         "gemms_equiv": it * k / max(n, 1)}
     return Lam, V
+
+
+def ipt_rate_columns(A, cols):
+    """Per-column IPT contraction rates, rho_j = max_i |W_ij| / |d_j - d_i|.
+
+    Costs O(N k) -- cheaper even than the O(N^2) full-matrix ipt_rate, and it
+    is the RIGHT test for the partial solver, because IPT's map is
+    column-separable: column j converges or not on its own, independent of
+    every other column.
+
+    That matters more than it sounds. A matrix can sit far outside the basin
+    globally while individual columns sit comfortably inside it -- an isolated
+    diagonal entry weakly coupled to a dense, strongly coupled band is exactly
+    that, and it is the ordinary situation for an impurity level in a band, a
+    defect state in a gap, or any localized mode. Screening per column finds
+    those; the global rate would reject the whole matrix.
+    """
+    xp = _am(A)
+    A = xp.asarray(A)
+    cols = np.asarray(cols, dtype=int)
+    d = xp.diag(A)
+    rates = xp.empty(len(cols))
+    for j, c in enumerate(cols):
+        gap = xp.abs(d[c] - d)
+        w = xp.abs(A[:, c])
+        mask = xp.arange(A.shape[0]) != c
+        g = gap[mask]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = xp.where(g > 0, w[mask] / xp.where(g > 0, g, 1.0), np.inf)
+        rates[j] = float(xp.max(r))
+    return rates

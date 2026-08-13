@@ -40,8 +40,13 @@ Where LAPACK is beaten, at full accuracy:
 For **few eigenpairs**, `ipt_eig_partial(A, cols)` exploits IPT's
 column-separability to compute k targeted eigenpairs at O(N²k) — **4–7.7×
 faster than ARPACK with shift-invert** on interior targets, with no
-factorization at all, and up to 143× cheaper than a full solve. See
-[GENERAL.md](GENERAL.md).
+factorization at all, and up to 143× cheaper than a full solve.
+
+Crucially the **basin is per-column too** (`ipt_rate_columns`, O(Nk)), which
+is much weaker than needing a near-diagonal matrix: a dense strongly-coupled
+band with global ρ = 992, where the full solver diverges, still yields its
+isolated impurity/defect levels to machine precision — **20–123× faster than
+ARPACK**. See [GENERAL.md](GENERAL.md).
 
 For the hard remainder — dense, non-normal, far from diagonal — `sdc_eigvals`
 (spectral divide and conquer via the matrix sign function) solves it to 1e-13

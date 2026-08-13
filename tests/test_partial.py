@@ -11,6 +11,7 @@ import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from ssj import ipt_eig, ipt_eig_partial  # noqa: E402
+from ssj.ipt import ipt_rate, ipt_rate_columns  # noqa: E402
 
 
 def near_diagonal(n, ratio, seed=0, sym=False):
@@ -86,6 +87,47 @@ def test_partial_cost_scales_with_k_not_n():
     ipt_eig(A)
     t_full = time.perf_counter() - t0
     assert t_small < t_full / 5
+
+
+def band_plus_impurities(n, niso=4, coupling=0.05, seed=0):
+    """A dense, strongly coupled band plus a few isolated levels far outside
+    it -- an impurity level in a band, a defect state in a gap."""
+    rng = np.random.default_rng(seed)
+    nb = n - niso
+    d = np.concatenate([rng.uniform(0, 1, nb), np.linspace(-9, 9, niso)])
+    W = rng.standard_normal((n, n))
+    np.fill_diagonal(W, 0.0)
+    W *= coupling / np.max(np.abs(W))
+    return np.diag(d) + W, list(range(nb, n))
+
+
+def test_per_column_rate_escapes_the_global_basin():
+    """The headline property of the partial solver: IPT's map is
+    column-separable, so the BASIN IS PER-COLUMN too. A matrix hopeless for the
+    full method still yields its isolated states."""
+    A, iso = band_plus_impurities(400)
+    assert ipt_rate(A) > 100, "global rate should be far outside the basin"
+    assert not ipt_eig(A, return_info=True)[2]["converged"]
+
+    rates = ipt_rate_columns(A, iso)
+    assert np.all(rates < 0.1), "isolated columns should be deep in the basin"
+
+    w, V, info = ipt_eig_partial(A, iso, return_info=True)
+    assert info["converged"]
+    exact = np.linalg.eigvals(A)
+    scale = np.linalg.norm(A, 2)
+    for j in range(len(iso)):
+        assert np.min(np.abs(exact - w[j])) / scale < 1e-12
+        assert np.linalg.norm(A @ V[:, j] - w[j] * V[:, j]) / scale < 1e-11
+
+
+def test_per_column_rate_flags_band_columns_as_hopeless():
+    """The screen must reject what it cannot do, not just accept what it can."""
+    A, iso = band_plus_impurities(300)
+    band_rates = ipt_rate_columns(A, [0, 1, 2, 3])
+    assert np.all(band_rates > 1.0)
+    _, _, info = ipt_eig_partial(A, [0, 1, 2, 3], return_info=True)
+    assert not info["converged"]
 
 
 if __name__ == "__main__":

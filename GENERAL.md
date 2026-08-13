@@ -516,10 +516,42 @@ Even at $k = N/2$ it is still 7× cheaper than the full solve, so there is no
 practical crossover at which one should switch back — take the whole spectrum
 this way if the basin permits.
 
-## The same caveat, unchanged
+## The basin is PER-COLUMN, which is a much weaker requirement
 
-This lives inside IPT's basin ($\rho \lesssim 1$, `ipt_rate`), and reports
-non-convergence rather than hiding it. The regime is dense near-diagonal
+The obvious objection to all of the above is that it still needs a
+near-diagonal matrix. It does not — it needs near-diagonal *columns*, and
+because the map is column-separable that is a strictly weaker condition:
+
+$$\rho_j = \max_{i \neq j} \frac{|W_{ij}|}{|d_j - d_i|}$$
+
+costs $O(Nk)$ (`ipt_rate_columns`, cheaper even than the full $O(N^2)$ test)
+and decides each column on its own. A matrix can be hopeless globally while
+individual columns sit deep inside the basin.
+
+Measured, $N=400$: a dense strongly-coupled band plus four isolated levels.
+**Global $\rho = 992$ and the full solver diverges** — yet the isolated
+columns have $\rho_j = 0.004$–$0.009$ and converge in 9 iterations to
+$5\times10^{-16}$.
+
+That is not a contrived construction: it is an impurity level in a band, a
+defect state in a gap, a localized mode — the ordinary situation in disordered
+and defect physics, and the setting IPT came from. Against ARPACK
+shift-invert targeting those levels:
+
+| $N$ | IPT partial | ARPACK | `dgeev` (all) | **vs ARPACK** | resid |
+|---|---|---|---|---|---|
+| 500 | 0.0048 s | 0.0952 s | 0.209 s | **20×** | 1.7e-14 |
+| 1000 | 0.0111 s | 0.3925 s | 0.731 s | **35×** | 4.8e-15 |
+| 2000 | 0.0462 s | 5.6945 s | 2.405 s | **123×** | 2.4e-14 |
+
+At $N=2000$ ARPACK is slower than a *full* `dgeev` — shift-invert on a dense
+matrix pays a cubic factorization and then converges slowly toward a cluster
+of nearby targets — while IPT partial is 52× faster than the full solve.
+
+## The same caveat, correctly scoped
+
+This lives inside IPT's basin, now measured **per column** (`ipt_rate_columns`,
+$O(Nk)$), and reports non-convergence rather than hiding it. The regime is dense near-diagonal
 matrices with targeted interior eigenpairs — exactly the setting where the
 alternatives are worst: a full dense solve wastes $N/k$ of its work, and
 shift-invert Krylov pays a cubic factorization to look at the middle of the
