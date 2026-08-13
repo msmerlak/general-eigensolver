@@ -229,3 +229,128 @@ the group of bounded similarities.
 The open case is now sharply bounded rather than merely unsolved: it is
 precisely the non-normal, non-near-diagonal regime, and the obstruction is
 that normalization there requires an unbounded similarity.
+
+---
+
+# Breaking the open case: spectral divide and conquer
+
+## The assumption worth dropping
+
+Every method above — Jacobi angles, IPT steps, shears — descends some
+invariant by **small local updates**, and every one of them either stalls or
+has a bounded basin on non-normal input. That common shape was never a
+requirement of the problem; it was inherited from the symmetric solver.
+
+The measured fact that suggests a different bet is the incumbent's *efficiency*,
+not its cost. At $N=1000$, with one gemm as the unit:
+
+| gemm | inverse | QR | pivoted QR | `dgeev` | `dgees` |
+|---|---|---|---|---|---|
+| 1.00 | 5.35 | 7.74 | 12.64 | **93.9** | 88.7 |
+
+A nonsymmetric eigendecomposition is only ~25$N^3$ flops — about 12 gemms'
+worth of arithmetic — yet `dgeev` costs 94. It runs at roughly an eighth of
+gemm efficiency because Hessenberg reduction and the QR iteration are
+bandwidth- and latency-bound. So a method doing **several times more
+arithmetic still wins, provided the arithmetic is gemms.**
+
+That licenses buying global convergence outright instead of hoping a local
+iteration achieves it.
+
+## The method
+
+Spectral divide and conquer (`src/ssj/sdc.py`; the family is classical —
+Bai–Demmel–Gu — and nothing here claims novelty):
+
+1. $\mathrm{sign}(A - \sigma I)$ splits the spectrum by which side of
+   $\mathrm{Re}(z) = \sigma$ each eigenvalue lies on;
+   $P = (I + S)/2$ is the spectral projector and $\mathrm{tr}\,P$ its rank.
+2. A pivoted QR of $P$ gives an orthonormal basis that block-triangularizes
+   $Q^{\mathsf T} A Q$. **This is an orthogonal similarity**, so it is
+   unconditionally stable — nothing here needs a well-conditioned eigenbasis,
+   which is exactly what defeated the shears.
+3. Recurse; base cases are 1×1 and 2×2 (complex pairs in closed form).
+
+The sign iteration reuses the repository's own pattern — globally convergent
+but expensive while far away, cheap and gemm-only once close:
+scaled Newton $X \leftarrow (\mu X + \mu^{-1}X^{-1})/2$, handing off to
+Newton–Schulz $X \leftarrow X(3I - X^2)/2$ once $\|X^2 - I\|$ is small.
+
+## It closes the open case
+
+**This is the first method here that solves dense, non-normal, far-from-diagonal
+matrices at all.** Ginibre matrices, where IPT diverges and the shears plateau:
+
+| $N$ | eigenvalue error vs LAPACK |
+|---|---|
+| 60 | 1e-14 |
+| 150 | 1.2e-14 |
+| 400 | 9.5e-14 |
+| 1600 | 4.8e-12 |
+
+No basin condition, no normality requirement, complex pairs handled.
+
+## It is not faster on this CPU, and the reason is exact
+
+| $N$ | SDC | `dgeev` | ratio |
+|---|---|---|---|
+| 400 | 0.374 s | 0.083 s | 0.22× |
+| 800 | 3.53 s | 0.463 s | 0.13× |
+| 1600 | 10.5 s | 1.41 s | 0.13× |
+
+The cost model says why, and the arithmetic is worth stating because it gives
+the break-even condition. A split needs ~12 sign iterations; most are Newton
+steps, and **each Newton step costs an inverse at 5.35 gemm-equivalents**.
+Weighting sub-blocks by $(n/N)^3$, the measured totals are ~22 inverses and
+~38 gemms, i.e. ~112 gemm-equivalents against `dgeev`'s 94 — already a loss
+before the recursion's small-block overhead, which the wall clock then adds.
+
+**Break-even is explicit: the sign iteration must be inverse-free.** At 2 gemms
+per iteration the same 16 weighted iterations cost ~32 gemms, plus QR and the
+block products, landing near 60 gemm-equivalents — a ~1.5× win. Every avoided
+inverse saves 5.35 and costs 2.
+
+Two things were tried and did not close that gap, both recorded so they are not
+retried blindly:
+
+- **Handing off to Newton–Schulz earlier** (`ns_switch` 0.6 → 0.99) does not
+  help and eventually hurts (112 → 158 gemm-equivalents). The Newton phase is
+  genuinely needed: after scaling, eigenvalues near the origin lie outside
+  Newton–Schulz's convergence region.
+- **A cheap spectral-norm bound** for the initial scaling,
+  $\sqrt{\|X\|_1\|X\|_\infty}$, replaced an SVD but overestimates a random
+  matrix badly, over-scaling $X$, pushing eigenvalues toward 0 and *adding*
+  Newton steps (0.23× → 0.08×). Power iteration is the right answer: $O(N^2)$
+  and tight.
+
+## Honest limits
+
+SDC is backward stable, not forward-magical. On a random upper-triangular
+matrix the eigenvector condition number is ~$10^{19}$ and the eigenvalues are
+hypersensitive; SDC's forward error degrades accordingly (~$10^{-2}$), as any
+backward-stable method's must. The test suite asserts that behavior rather
+than a forward accuracy no method could deliver.
+
+## Where this genuinely wins
+
+The whole ledger above is one CPU stack, where a factorization costs 5–8
+gemms. The ratios that make SDC lose here are exactly the ratios that invert
+on accelerators and distributed machines: gemm-dominated hardware makes the
+inverse and QR comparatively cheap and gemm-rich, while `dgeev`'s sequential
+QR iteration is notoriously poor there. That is why this algorithm family
+exists in the literature at all — it was designed for parallel machines, not
+for single-socket LAPACK. `bench_gpu.py`-style measurement on a GPU is the
+test that would settle it, and is not available here.
+
+## Final map
+
+| input class | method | status |
+|---|---|---|
+| symmetric / Hermitian | SSJ, IPT, hybrid | solved; IPT beats `dsyevd` 1.4–1.9× near-diagonal |
+| normal | `normal_eig` | solved exactly; 1.3–1.9× over `dgeev`, unitary output |
+| general, near-diagonal ($\rho \lesssim 0.1$) | `ipt_eig` | solved; **4–12× over `dgeev`** |
+| **general, non-normal, far from diagonal** | `sdc_eigvals` | **solved** (1e-13), but 0.13–0.22× of `dgeev` on CPU |
+
+Nothing in this repository is now *unsolved*. What remains is a performance
+gap with a stated break-even condition, on hardware where the constants are
+known to move.

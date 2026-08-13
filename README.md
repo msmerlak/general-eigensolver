@@ -37,6 +37,11 @@ Where LAPACK is beaten, at full accuracy:
 | **general** | near-diagonal ($\rho \lesssim 0.1$) | **4–12×** faster than `dgeev` | [GENERAL.md](GENERAL.md) |
 | **normal** (nonsymmetric, complex spectrum) | any | **1.3–1.9×** faster than `dgeev`, and *unitary* eigenvectors | [GENERAL.md](GENERAL.md) |
 
+For the hard remainder — dense, non-normal, far from diagonal — `sdc_eigvals`
+(spectral divide and conquer via the matrix sign function) solves it to 1e-13
+with no basin condition, though at 0.13–0.22× of `dgeev` on this CPU. GENERAL.md
+gives the exact break-even condition.
+
 Both wins are *dispatchable*: applicability is decided by
 $\rho = \max|W_{ij}|/|d_i-d_j|$, which `ipt_rate` computes in $O(N^2)$ —
 free next to a single gemm — so a caller can pick IPT or LAPACK correctly
@@ -110,6 +115,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `tests/test_ssj.py` — correctness tests (run with `pytest` or directly)
 - `src/ssj/ipt.py` — IPT and the SSJ->IPT hybrid (symmetric and general)
 - `src/ssj/normal.py` — normal-matrix solver and the norm-reducing shear
+- `src/ssj/sdc.py` — spectral divide and conquer (general, globally convergent)
 - `experiments_shear.py` — the shear/normality explorations
 - `bench_vs_lapack.py` — head-to-head against LAPACK
 - `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
