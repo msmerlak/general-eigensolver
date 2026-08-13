@@ -35,6 +35,7 @@ Where LAPACK is beaten, at full accuracy:
 |---|---|---|---|
 | symmetric | near-diagonal ($\rho \lesssim 0.03$) | **1.4–1.9×** faster than `dsyevd` | [BENCHMARKS.md](BENCHMARKS.md) |
 | **general** | near-diagonal ($\rho \lesssim 0.1$) | **4–12×** faster than `dgeev` | [GENERAL.md](GENERAL.md) |
+| **normal** (nonsymmetric, complex spectrum) | any | **1.3–1.9×** faster than `dgeev`, and *unitary* eigenvectors | [GENERAL.md](GENERAL.md) |
 
 Both wins are *dispatchable*: applicability is decided by
 $\rho = \max|W_{ij}|/|d_i-d_j|$, which `ipt_rate` computes in $O(N^2)$ —
@@ -46,13 +47,16 @@ nonsymmetric matrices, and why.
 
 ```python
 import numpy as np
-from ssj import ssj_eigh, ipt_eigh, ipt_eig, ssj_ipt_eigh
+from ssj import ssj_eigh, ipt_eigh, ipt_eig, ssj_ipt_eigh, normal_eig
 
 # near-diagonal symmetric input: a handful of gemms, beating dsyevd
 w, V = ipt_eigh(A_near_diagonal)
 
 # GENERAL (nonsymmetric) near-diagonal input: 4-12x faster than dgeev
 w, V = ipt_eig(A_general)          # eigenvectors are NOT orthogonal
+
+# normal but nonsymmetric (A A^T = A^T A): exact, via ONE Hermitian solve
+w, U = normal_eig(A_normal)        # U unitary, w complex
 
 # is IPT applicable? O(N^2), free next to a gemm
 from ssj.ipt import ipt_rate
@@ -105,6 +109,8 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `experiments.py` — mechanism experiments: trajectory, monotonicity, and controlled divergence of the variants that remove a saturation
 - `tests/test_ssj.py` — correctness tests (run with `pytest` or directly)
 - `src/ssj/ipt.py` — IPT and the SSJ->IPT hybrid (symmetric and general)
+- `src/ssj/normal.py` — normal-matrix solver and the norm-reducing shear
+- `experiments_shear.py` — the shear/normality explorations
 - `bench_vs_lapack.py` — head-to-head against LAPACK
 - `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
 - `ALGORITHM.md` — algorithm specification + implementation notes

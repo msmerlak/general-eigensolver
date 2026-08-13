@@ -118,8 +118,114 @@ near-misses; each is blocked by a different structural fact:
 3. IPT's basin needs separated eigenvalues, which the dense-spectrum case
    cannot supply, and SSJ is too expensive to be a preconditioner anyway.
 
-The direction the literature points to, and the one this repository has *not*
-tried, is non-orthogonal norm-reducing transformations — Eberlein-type shears,
-which reduce the departure from normality rather than any off-diagonal norm.
-That changes the invariant being decreased, which is precisely what failures 1
-and 2 say is required. Untested here.
+The direction the failures point to is non-orthogonal norm-reducing
+transformations — Eberlein-type shears, which reduce the *departure from
+normality* rather than any off-diagonal norm. That changes the invariant being
+decreased, which is precisely what failures 1 and 2 say is required. Tried
+below.
+
+---
+
+# Shears: descending the right invariant
+
+The departure from normality
+
+$$\Delta(A) = \|A\|_F^2 - \sum_i |\lambda_i|^2 \;\ge\; 0, \qquad
+\Delta(A) = 0 \iff A \text{ normal}$$
+
+is decreasable by non-orthogonal similarity, because $\|A\|_F$ is not
+similarity-invariant while the spectrum is. The simultaneous (all-pairs,
+SSJ-style) form has a closed-form steepest-descent direction. For
+$A \leftarrow T^{-1}AT$ with $T = I + G$, to first order $A \leftarrow A +
+[A,G]$; splitting $G = K + S$ into antisymmetric (rotation) and symmetric
+(shear) parts,
+
+$$\delta\|A\|_F^2 = 2\langle A, [A,S]\rangle
+= 2\,\mathrm{tr}\!\left((A^{\mathsf H}A - AA^{\mathsf H})S\right)
+= 2\langle C, S\rangle$$
+
+so the steepest-descent shear is just $S = -\mu C$ with $C = A^{\mathsf H}A -
+AA^{\mathsf H}$ the self-commutator — symmetric, traceless (hence
+volume-preserving, no scaling drift), and zero exactly when $A$ is normal.
+The rotation part cannot contribute: orthogonal similarities leave $\|A\|_F$,
+the spectrum, and therefore $\Delta$ exactly invariant.
+
+**It works, and needs the same saturation lesson.** A fixed step overshoots
+on near-normal input (measured: a matrix at defect 0.000 pushed to 0.028 by
+one $\mathrm{cap}=0.25$ step). Backtracking until $\|A\|_F$ actually
+decreases fixes it. Ginibre $N=100$: $\Delta$ falls 0.502 → 0.027 over 30
+shears, with the spectrum preserved to 3e-15.
+
+## The rotation phase was wrong, and the diagnosis is exact
+
+Shearing to normality and then rotating stalled — *including on a matrix that
+was normal by construction* (defect 1.3e-16, yet off stuck at 3.13 out of
+5.13). That isolates the bug to the rotation, not the shear.
+
+The reason is structural. For real normal $A = S + N$ (symmetric plus
+antisymmetric parts), $A$ normal means $S$ and $N$ commute — but on every
+complex-conjugate eigenvalue pair, **$S$ has a double eigenvalue**. So
+diagonalizing $S$ alone (the ordinary SSJ angle map) resolves that degeneracy
+arbitrarily and never aligns with $N$. The rotation phase must diagonalize
+$S$ and $N$ *jointly*.
+
+## Result: normal matrices are solved exactly, by reduction to the symmetric problem
+
+Write $A = H_1 + iH_2$ with $H_1 = (A + A^{\mathsf H})/2$ and $H_2 = (A -
+A^{\mathsf H})/2i$, both Hermitian. $A$ is normal precisely when they commute,
+so they share an eigenbasis, and diagonalizing the single Hermitian matrix
+$H_1 + \alpha H_2$ for **generic** $\alpha$ recovers it. One Hermitian
+eigensolve therefore diagonalizes $A$ (`normal_eig`).
+
+The genericity is not a detail — it is the whole fix, and it is measured:
+
+| $\alpha$ | off after diagonalizing $H_1 + \alpha H_2$ |
+|---|---|
+| 0 (Hermitian part alone) | 3.13 — fails |
+| 0.739 (generic) | **1.3e-13** |
+
+on a matrix normal to 1.3e-16. Against LAPACK `dgeev` on normal input:
+
+| $N$ | `normal_eig` | `dgeev` | speedup | eigenvalue error | resid |
+|---|---|---|---|---|---|
+| 200 | 0.014 s | 0.019 s | **1.33×** | 7.4e-15 | 1.2e-12 |
+| 400 | 0.077 s | 0.143 s | **1.86×** | 6.0e-15 | 3.7e-12 |
+| 800 | 0.301 s | 0.408 s | **1.36×** | 6.7e-15 | 4.9e-11 |
+| 1200 | 0.976 s | 0.915 s | 0.94× | 6.1e-15 | 2.0e-11 |
+
+Besides speed, the output is **unitary** — `dgeev` returns a generally
+non-orthogonal eigenvector matrix, which can be arbitrarily ill-conditioned.
+For normal input this method cannot produce one.
+
+## Where the shear route stops, and why it is fundamental
+
+The full pipeline (shear to normal, then `normal_eig`) is limited by how
+normal the shear can actually make the matrix, and the residual defect passes
+straight through to the eigenvalue error:
+
+| input | defect after shears | resulting off | eigenvalue error |
+|---|---|---|---|
+| near-diagonal $\rho=0.5$, $N=60$ | 1.4e-4 | 2.3e-2 | 8.2e-4 |
+| Ginibre $N=60$ | 7.6e-3 | 2.2e-1 | 1.9e-2 |
+
+The plateau is **not a tuning failure**. A matrix whose eigenvector basis is
+ill-conditioned cannot be normalized by a *bounded* similarity: normalizing
+requires a transformation whose conditioning matches the eigenbasis, so as the
+eigenbasis degrades the required shear grows without bound and the descent
+stalls at a positive defect. Ginibre eigenvector conditioning worsens with
+$N$, which is exactly the observed behavior. Descending the right invariant
+was necessary but is not sufficient; the infimum is simply not attained inside
+the group of bounded similarities.
+
+## Final map of the general problem
+
+| input class | method | status |
+|---|---|---|
+| symmetric / Hermitian | SSJ, IPT, hybrid | solved; IPT beats `dsyevd` 1.4–1.9× near-diagonal |
+| **normal** | `normal_eig` (joint Hermitian reduction) | **solved exactly**, 1.3–1.9× over `dgeev`, unitary output |
+| general, near-diagonal ($\rho \lesssim 0.1$) | `ipt_eig` | **solved**, 4–12× over `dgeev` |
+| general, far from diagonal | — | **open**: shears descend the right invariant but plateau whenever the eigenbasis is ill-conditioned |
+
+The open case is now sharply bounded rather than merely unsolved: it is
+precisely the non-normal, non-near-diagonal regime, and the obstruction is
+that normalization there requires an unbounded similarity.
