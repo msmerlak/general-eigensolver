@@ -67,6 +67,17 @@ shift-invert), with the margin *growing* with N. Cost is genuinely O(nnz):
 shift-invert is the only alternative and its fill-in is worse: **382× → 13,234×**
 at N=2k → 10k. See `bench_sparse.py`.
 
+The envelope, measured (`python bench_sparse.py --envelope`): it is **not**
+limited to a handful of eigenpairs — cost is linear in k at a flat ~6 ms per
+eigenpair with the iteration count still 3–4 at k=1024 (1024 interior
+eigenpairs of a 20,000-square matrix in 6 s). The binding constraint is
+coupling, not k: ρ ≲ 0.05 converged on every instance tried, ρ ≳ 0.25
+diverged on every one, and *in between the outcome is instance-dependent* —
+two instances measured here cross, one converging at ρ = 0.122 while the
+other diverges at ρ = 0.096. Cost also degrades well before correctness does
+(3–6 iterations at ρ ≲ 0.02, 20+ near the edge), and divergence can be slow
+enough that a tight `max_iter` misreports slow convergence as failure.
+
 `window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
 purification (matmul only, no factorization, no target guess) with a
 *certified* count — unlike ARPACK shift-invert, which needs `k` guessed up

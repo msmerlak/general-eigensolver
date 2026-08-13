@@ -103,6 +103,59 @@ def test_scales_to_large_N():
         assert np.linalg.norm(A @ V[:, j] - w[j] * V[:, j]) / nrm < 1e-10
 
 
+def test_many_eigenpairs_stay_cheap_per_pair():
+    """Not a handful-of-eigenpairs method: because the columns are
+    independent, asking for 128 targets instead of 4 buys no extra coupling
+    and no extra iterations -- cost is linear in k at a flat per-pair rate."""
+    n = 5000
+    A, d = sparse_diagonally_dominant(n, seed=4)
+    order = np.argsort(np.abs(d - np.median(d)))
+    nrm = float(np.max(np.abs(d))) + 1.0
+    its = []
+    for k in (4, 128):
+        cols = list(order[:k])
+        w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True)
+        assert info["converged"]
+        assert V.shape == (n, k)
+        its.append(info["iters"])
+        resid = np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm
+        assert resid < 1e-10
+    assert its[1] <= its[0] + 2         # 32x more targets, same iteration count
+
+
+def test_fails_loudly_outside_the_basin():
+    """The dispatcher's safety property: outside the basin the solver must
+    REPORT failure, never return a plausible wrong answer. Uses a generous
+    max_iter, because divergence here can be slow (763 iterations in the
+    GENERAL.md sweep) and a tight budget cannot tell it from slow success."""
+    n = 2000
+    A0, d = sparse_diagonally_dominant(n, seed=5)
+    W = A0 - sp.diags(d)
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:3])
+    for coupling, expect in ((5.0, True), (320.0, False)):
+        A = sp.diags(d) + coupling * W
+        _, _, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True,
+                                     max_iter=1000)
+        assert bool(info["converged"]) is expect, (coupling, info)
+
+
+def test_rate_screen_accepts_sparse_without_densifying():
+    """The screen is recommended precisely for the large-sparse case, so it
+    must not build a dense N-by-N intermediate to compute an O(Nk) quantity.
+    Values must match the dense computation exactly."""
+    from ssj.ipt import ipt_rate_columns
+    n = 1500
+    A, d = sparse_diagonally_dominant(n, seed=6)
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:5])
+    r_sparse = ipt_rate_columns(A, cols)
+    r_dense = ipt_rate_columns(np.asarray(A.todense()), cols)
+    assert np.allclose(r_sparse, r_dense, rtol=1e-12, atol=0)
+    # and it is usable at a size where densifying would be 32 GB
+    big, dbig = sparse_diagonally_dominant(100000, seed=7)
+    rb = ipt_rate_columns(big, [int(np.argmin(np.abs(dbig - np.median(dbig))))])
+    assert np.isfinite(rb[0]) and rb[0] > 0
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:

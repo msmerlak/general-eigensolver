@@ -516,10 +516,30 @@ def ipt_rate_columns(A, cols):
     NECESSARY-ish indicator for ranking candidates, gate conservatively
     (<= 0.1), and always check the returned `converged` flag rather than
     trusting the screen.
+
+    Sparse input is handled without densifying: only column c is ever
+    materialized, so the screen stays O(N k) in time and O(N) in memory even
+    at N = 200,000. That is the case it matters most for -- the large-sparse
+    interior problem is where the screen decides between a few matvecs and a
+    factorization that may not be affordable at all.
     """
+    cols = np.asarray(cols, dtype=int)
+    if hasattr(A, "tocsc"):               # scipy.sparse matrix
+        d = np.asarray(A.diagonal()).ravel()
+        Acsc = A.tocsc()
+        rates = np.empty(len(cols))
+        for j, c in enumerate(cols):
+            w = np.abs(np.asarray(Acsc[:, c].todense()).ravel())
+            gap = np.abs(d[c] - d)
+            mask = np.arange(A.shape[0]) != c
+            g, w = gap[mask], w[mask]
+            with np.errstate(divide="ignore", invalid="ignore"):
+                r = np.where(g > 0, w / np.where(g > 0, g, 1.0), np.inf)
+            rates[j] = float(np.max(r))
+        return rates
+
     xp = _am(A)
     A = xp.asarray(A)
-    cols = np.asarray(cols, dtype=int)
     d = xp.diag(A)
     rates = xp.empty(len(cols))
     for j, c in enumerate(cols):

@@ -1294,3 +1294,68 @@ this — but it is *not* evidence about lattices, where GENERAL.md records that
 2D Anderson defeats every method here including this one, nor about matrices
 whose diagonal carries no spectral information. The `ipt_rate_columns` screen
 (O(Nk), free) is what tells the two apart before committing.
+
+Two questions decide whether the win applies to a given problem: *how many*
+eigenpairs it survives, and *how strong* the coupling can get. Both measured,
+reproducibly, with `python bench_sparse.py --envelope`.
+
+**How many eigenpairs — no practical limit.** $N=20{,}000$ sparse symmetric,
+interior targets:
+
+| $k$ | time | iters | rel. residual | per eigenpair |
+|---|---|---|---|---|
+| 4 | 0.025 s | 3 | 9.2e-17 | 6.17 ms |
+| 32 | 0.089 s | 3 | 2.4e-16 | 2.77 ms |
+| 256 | 1.360 s | 3 | 6.4e-15 | 5.31 ms |
+| 1,024 | 6.098 s | 4 | 3.9e-16 | 5.96 ms |
+
+Cost is linear in $k$ at a flat ~6 ms/eigenpair, and the iteration count
+stays at 3–4 across a 256× range of $k$ — the columns are independent, so
+asking for more of them buys no coupling and no extra iterations. This is
+therefore *not* a handful-of-eigenpairs method: a thousand interior
+eigenpairs of a 20,000-square sparse matrix takes six seconds. (The
+competitor table above was run at $k=4$; nothing here claims 347× still holds
+at $k=1024$, only that IPT itself does not degrade.)
+
+**How strong the coupling — and the finding that the threshold is not a
+number.** Sweeping the off-diagonal scale on two instances:
+
+| $N$ | coupling | $\rho_{\max}$ | outcome | iters | err |
+|---|---|---|---|---|---|
+| 5,000 | 5 | 0.0076 | converged | 5 | 7.6e-11 |
+| 5,000 | 20 | 0.0304 | converged | 8 | 1.4e-11 |
+| 5,000 | 40 | 0.0609 | converged | 10 | 1.7e-10 |
+| 5,000 | 80 | **0.1217** | **converged** | 20 | 2.5e-10 |
+| 5,000 | 160 | 0.2434 | diverges | 11 | 6.8e+02 |
+| 2,000 | 20 | 0.0239 | converged | 12 | 3.5e-11 |
+| 2,000 | 40 | 0.0478 | converged | 23 | 1.0e-10 |
+| 2,000 | 80 | **0.0956** | **diverges** | 763 | 9.6e+01 |
+| 2,000 | 160 | 0.1913 | diverges | 14 | 2.0e+02 |
+
+The two instances **cross**: $N=5000$ converges at $\rho = 0.122$ while
+$N=2000$ diverges at $\rho = 0.096$. So there is no universal $\rho$ at which
+the method stops working — the screen is a one-hop quantity and the real
+failure is driven by multi-hop resonances it cannot see, exactly the caveat
+`ipt_rate_columns` already carries. What the sweep does establish is an
+*empirically safe* region and a *definitely unsafe* one: $\rho \lesssim 0.05$
+converged on every instance tried, $\rho \gtrsim 0.25$ diverged on every one,
+and in between it is instance-dependent. The existing gate of 0.1 sits inside
+the ambiguous band, which is the right place for it only because the
+dispatcher treats a wrong screen as a cost, not a correctness risk.
+
+Two operational consequences, both of which cost real debugging time here:
+
+* **Cost degrades well before correctness does.** Iterations run 3–6 at
+  $\rho \lesssim 0.02$ but 20–23 by $\rho \approx 0.05$–$0.12$ — a 4–8×
+  slowdown while still returning machine-precision answers. The headline
+  8–347× margins live in the low-$\rho$ regime; near the edge the method
+  still *works* but much of the advantage is gone, surviving only where the
+  alternative factorization has become infeasible outright.
+* **Divergence can be slow, so `max_iter` can lie.** The $N=2000$,
+  $\rho = 0.096$ row took **763 iterations** to declare failure, and a
+  neighbouring case needed 76 iterations to succeed. With a tight `max_iter`
+  the two are indistinguishable: an early run of this sweep reported
+  divergence at $\rho = 0.12$ that was merely slow convergence under
+  `max_iter=60`. Read `converged=False` as "did not converge in the budget
+  given", and if the answer matters, re-run with a larger budget before
+  concluding the target is outside the basin.

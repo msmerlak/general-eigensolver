@@ -34,6 +34,7 @@ from scipy.sparse.linalg import (LinearOperator, eigs, eigsh,  # noqa: E402
                                   lobpcg, splu)
 
 from ssj import ipt_eig_partial  # noqa: E402
+from ssj.ipt import ipt_rate_columns  # noqa: E402
 
 
 def sparse_diagonally_dominant(n, nnz_row=8, coupling=0.05, seed=0):
@@ -97,7 +98,49 @@ def _lobpcg_interior(A, sigma, cols, n, tol=1e-10):
     return wA, V
 
 
+def envelope():
+    """The two boundaries of the sparse win: how many eigenpairs it survives,
+    and how strong the coupling can get before the basin is lost.
+
+    The coupling sweep runs with a deliberately generous max_iter, because
+    with a tight one slow convergence is indistinguishable from divergence --
+    which is itself the finding (see GENERAL.md)."""
+    print("=== k-scaling (N=20000, sparse symmetric, interior) ===")
+    n = 20000
+    A, d = sparse_diagonally_dominant(n, seed=1)
+    order = np.argsort(np.abs(d - np.median(d)))
+    nrm = float(np.max(np.abs(d))) + 1.0
+    print(f'{"k":>6} {"time":>9} {"iters":>6} {"resid":>10} {"ms/pair":>9}')
+    for k in (4, 32, 256, 1024):
+        cols = list(order[:k])
+        t0 = time.perf_counter()
+        w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True)
+        t = time.perf_counter() - t0
+        resid = np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm
+        print(f"{k:6} {t:8.3f}s {info['iters']:6} {resid:10.1e} "
+              f"{1000 * t / k:8.2f}")
+
+    print("\n=== coupling sweep: where the basin ends ===")
+    print(f'{"N":>6} {"coupling":>9} {"rho":>8} {"outcome":>10} {"iters":>6} '
+          f'{"err":>10}')
+    for n, seed in ((5000, 0), (2000, 5)):
+        A0, d = sparse_diagonally_dominant(n, seed=seed)
+        W = A0 - sp.diags(d)
+        cols = list(np.argsort(np.abs(d - np.median(d)))[:4])
+        for c in (5.0, 10.0, 20.0, 40.0, 80.0, 160.0, 320.0):
+            A = sp.diags(d) + c * W
+            rho = float(np.max(ipt_rate_columns(A, cols)))
+            _, _, info = ipt_eig_partial(A, cols, return_info=True,
+                                         hermitian=True, max_iter=1000)
+            tag = "converged" if info["converged"] else "DIVERGES"
+            print(f"{n:6} {c:9.1f} {rho:8.4f} {tag:>10} {info['iters']:6} "
+                  f"{info['err']:10.1e}")
+
+
 if __name__ == "__main__":
+    if "--envelope" in sys.argv:
+        envelope()
+        sys.exit(0)
     sizes = [int(a) for a in sys.argv[1:]] or [2000, 5000, 10000, 20000]
     print(f'{"N":>7} {"nnz":>8} {"IPT":>10} {"ARPACK s-i":>12} {"LU fill":>9} '
           f'{"LOBPCG":>10} {"IPT vs best":>12}')
