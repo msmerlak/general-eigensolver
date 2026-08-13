@@ -171,6 +171,32 @@ def test_sparse_block_agrees_with_the_dense_implementation():
     assert abs(np.real(lam_s) - np.real(lam_d)) / scale < 1e-10
 
 
+def test_sparse_block_works_nonsymmetric_too():
+    """The block rung needs no symmetry -- the b-by-b problem is solved with a
+    general eigensolver -- and the nonsymmetric sparse case is where the
+    margins are largest, since no LOBPCG equivalent exists there."""
+    import scipy.sparse as sp
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from bench_sparse import sparse_nonsymmetric
+
+    from ssj.block_ipt import sparse_block_ipt_eig
+    n = 1500
+    A0, d = sparse_nonsymmetric(n, seed=0)
+    A = (sp.diags(d) + 320.0 * (A0 - sp.diags(d))).tocsr()
+    t = int(np.argmin(np.abs(d - np.median(d))))
+
+    _, _, plain = ipt_eig_partial(A, [t], return_info=True, hermitian=False,
+                                  max_iter=400)
+    assert not plain["converged"]          # plain IPT fails at this coupling
+
+    lam, v, info = sparse_block_ipt_eig(A, t, return_info=True)
+    assert info["converged"]
+    Ad = np.asarray(A.todense())
+    scale = np.linalg.norm(Ad, 2)
+    assert np.min(np.abs(np.linalg.eigvals(Ad) - lam)) / scale < 1e-13
+    assert np.linalg.norm(A @ v - lam * v) / scale < 1e-11
+
+
 def test_hopeless_sparse_target_fails_cheaply():
     """Failure has to be cheap, or escalating before falling back is a net
     loss -- without the early give-up a hopeless target ran the whole outer

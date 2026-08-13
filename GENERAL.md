@@ -1483,6 +1483,13 @@ It reaches past the plain-IPT boundary, verified against dense ground truth
 So the usable band roughly quadruples, from $\rho \approx 0.1$ to
 $\rho \approx 0.4$.
 
+It needs no symmetry — the $b \times b$ problem goes through a general
+eigensolver — so it extends the **nonsymmetric** sparse case too, which is
+where the margins are largest because no LOBPCG equivalent exists there. At
+$N=1500$, coupling 320 ($\rho = 0.149$), plain IPT diverges and block IPT
+returns the eigenvalue to **2.9e-15**, i.e. at full precision rather than the
+1e-10 seen in the symmetric runs.
+
 ### Three findings that were not the obvious direction
 
 **A larger `max_block` is worse.** At $N=2000$, coupling 160: cap 64 converges
