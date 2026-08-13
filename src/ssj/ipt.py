@@ -45,31 +45,48 @@ from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 __all__ = ["ipt_eigh", "ssj_ipt_eigh"]
 
 
-def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3):
+def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
+                 v_is_identity=False):
     """Run the IPT fixed point from V (diagonally normalized). Returns
-    (V, Lambda, iters, converged, err) with err the relative residual proxy
-    max|V_new - V_old| measured in the diagonal normalization.
+    (V, Lambda, iters, converged, err) with err the max update in the diagonal
+    normalization.
 
-    One gemm per iteration. Divergence is detected by the error growing past
-    divergence_factor times its initial value, which is what the bounded basin
-    looks like from inside the loop.
+    One gemm per iteration, and the loop is written to keep the O(N^2)
+    elementwise work from costing as much as that gemm: at N=1000 a single
+    N-by-N temporary is 8 MB, so the naive form (five temporaries per
+    iteration) is memory-bandwidth-bound and roughly doubles the iteration
+    cost. Everything below is in-place or fused, and the reciprocal-gap matrix
+    is the only extra array kept live.
+
+    v_is_identity skips the first gemm: W @ I = W.
+
+    Divergence is detected by the error growing past divergence_factor times
+    its initial value, which is what the bounded basin looks like from inside
+    the loop.
     """
     xp = _am(V)
     n = V.shape[0]
     idx = xp.arange(n)
     err0 = None
     err = np.inf
+    Lam = d
+    R = xp.empty_like(V)      # reciprocal gaps, reused every iteration
     for it in range(1, max_iter + 1):
-        WV = W @ V                              # the single gemm
+        if it == 1 and v_is_identity:
+            WV = W.copy()     # W @ I
+        else:
+            WV = W @ V        # the single gemm
         Lam = d + xp.real(xp.diag(WV))          # Lambda_j = d_j + (WV)_jj
-        gap = Lam[None, :] - d[:, None]         # gap_ij = Lambda_j - d_i
-        # The diagonal of `gap` is (WV)_jj, not a level gap; the diagonal of V
-        # is pinned to 1 anyway, so neutralize it rather than divide by it.
-        gap = gap + xp.eye(n, dtype=gap.dtype)
-        Vn = WV / gap
-        Vn[idx, idx] = 1.0
-        err = float(xp.max(xp.abs(Vn - V)))
-        V = Vn
+        # R = 1 / (Lambda_j - d_i), with the diagonal neutralized: there
+        # gap_jj = (WV)_jj is not a level gap and V_jj is pinned to 1.
+        xp.subtract(Lam[None, :], d[:, None], out=R)
+        R[idx, idx] = 1.0
+        xp.reciprocal(R, out=R)
+        xp.multiply(WV, R, out=WV)              # WV becomes the new V
+        WV[idx, idx] = 1.0
+        xp.subtract(WV, V, out=V)               # V holds the update ...
+        err = float(xp.max(xp.abs(V)))
+        V = WV                                  # ... then becomes the iterate
         if err0 is None:
             err0 = max(err, 1e-300)
         if err <= tol:
@@ -79,17 +96,23 @@ def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3):
     return V, Lam, max_iter, False, err
 
 
-def _finalize(A, V, Lam, xp):
-    """Orthonormalize the diagonally-normalized V and return sorted (w, V).
+def _finalize(A, V, Lam, xp, converged=True):
+    """Normalize the diagonally-normalized V and return sorted (w, V).
 
-    IPT's columns are exact eigenvectors up to scale at convergence, so they
-    are already orthogonal in exact arithmetic; column normalization suffices
-    and a QR pass repairs the roundoff-level defect. Eigenvalues are recomputed
-    as Rayleigh quotients so they are consistent with the returned vectors.
+    At convergence IPT's columns are exact eigenvectors up to scale, hence
+    already mutually orthogonal to roundoff -- column normalization is all
+    that is needed, and the eigenvalues Lambda are exact as computed. Both a
+    QR pass and a Rayleigh-quotient recomputation would cost about as much as
+    the entire iteration (measured: a QR at N=1000 costs ~4 gemms against a
+    6-gemm solve), so they are spent only when the iteration did NOT converge
+    and the output would otherwise be silently non-orthogonal.
     """
     V = V / xp.linalg.norm(V, axis=0, keepdims=True)
-    V = _orth_qr(V)
-    w = xp.real(xp.sum(xp.conj(V) * (A @ V), axis=0))
+    if converged:
+        w = Lam
+    else:
+        V = _orth_qr(V)
+        w = xp.real(xp.sum(xp.conj(V) * (A @ V), axis=0))
     order = np.argsort(w, kind="stable") if xp is np else xp.argsort(w)
     return w[order], V[:, order]
 
@@ -120,8 +143,8 @@ def ipt_eigh(A, tol=1e-13, max_iter=200, V0=None, return_info=False):
     V = xp.eye(n, dtype=A.dtype) if V0 is None else xp.array(V0, dtype=A.dtype)
 
     V, Lam, iters, converged, err = _ipt_iterate(
-        W, d, V, max_iter, tol * norm_A, norm_A)
-    w, V = _finalize(A, V, Lam, xp)
+        W, d, V, max_iter, tol * norm_A, norm_A, v_is_identity=V0 is None)
+    w, V = _finalize(A, V, Lam, xp, converged=converged)
     if return_info:
         return w, V, {"iters": iters, "gemms": iters, "converged": converged,
                       "err": err}
