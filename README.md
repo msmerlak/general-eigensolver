@@ -46,7 +46,7 @@ nonsymmetric matrices, and why.
 
 ```python
 import numpy as np
-from ssj import ssj_eigh, ipt_eigh, ssj_ipt_eigh
+from ssj import ssj_eigh, ipt_eigh, ipt_eig, ssj_ipt_eigh
 
 # near-diagonal symmetric input: a handful of gemms, beating dsyevd
 w, V = ipt_eigh(A_near_diagonal)
@@ -119,10 +119,20 @@ NumPy. SciPy is optional (used only for the LAPACK `trtri` inside the
 
 ## Honest context
 
-This is not CPU-competitive with LAPACK from a cold start (`dsyevd` wins by
-~50× at N=1000 on our box; see BENCHMARKS.md). The niches are (a) hardware
-where an eigensolve costs many gemm-equivalents and the `"gemm"` variant's
-pure-multiplication diet applies, and (b) robustness: a three-line,
-parameter-free method with an empirically global basin and native degeneracy
-handling. No convergence proof is known; see the "Not established" section of
-RESULTS.md.
+**SSJ** is not CPU-competitive with LAPACK from a cold start on dense random
+input (`dsyevd` wins by ~30× at N=1000 on our box; see BENCHMARKS.md). Its
+niches are hardware where an eigensolve costs many gemm-equivalents and the
+`"gemm"` variant's pure-multiplication diet applies, and robustness — a
+three-line, parameter-free method with an empirically global basin and native
+degeneracy handling. No convergence proof is known; see the "Not established"
+section of RESULTS.md.
+
+**IPT** is the part that beats LAPACK, but only inside its basin
+(ρ ≲ 0.1), which requires well-separated eigenvalues and not merely small
+coupling — see GENERAL.md. Outside the basin it diverges, and reports that
+rather than returning a wrong answer. Tracking a perturbed matrix and dense
+random input both *lose*, measured, in BENCHMARKS.md.
+
+All timings come from one shared 4-core container with ~30% run-to-run
+noise; gemm-equivalent counts are the noise-free comparison and are reported
+alongside. GPU numbers are predictions, not measurements.
