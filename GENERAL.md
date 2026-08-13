@@ -354,3 +354,62 @@ test that would settle it, and is not available here.
 Nothing in this repository is now *unsolved*. What remains is a performance
 gap with a stated break-even condition, on hardware where the constants are
 known to move.
+
+---
+
+# Zolotarev: implemented, and it does not rescue the general case
+
+The break-even above (make the sign iteration cheap) has a famous candidate
+answer: Zolotarev's 1877 best rational approximation to $\mathrm{sign}(x)$,
+which Nakatsukasa & Freund show converges in **two iterations** in double
+precision. `src/ssj/zolo.py` implements it. The conclusion is a correction to
+the obvious expectation, so it is worth stating plainly.
+
+## The construction is correct
+
+Type $(2r+1, 2r)$, coefficients from Jacobi elliptic functions:
+$c_i = \ell^2\,\mathrm{sn}^2/\mathrm{cn}^2(iK/(2r+1); \ell')$.
+Validated independently of any matrix code — the error equioscillates exactly
+$2r+1$ times (the signature of a best approximant), is odd, and improves with
+$r$ as theory demands. Two composed passes reach $10^{-15}$ from $\ell =
+10^{-3}$, reproducing the paper's headline claim.
+
+**One implementation trap, worth recording.** The product form must *not* be
+applied factor-by-factor to a matrix: the factors have wildly different scales
+and only cancel at the end, so intermediates overflow — measured $\|Y\|$
+reaching $10^{18}$ over $r=8$ factors on a well-conditioned symmetric matrix,
+ending in guaranteed failure. The partial-fraction form
+$Z(x) = Mx\left[1 + \sum_j a_j/(x^2+c_{2j-1})\right]$ has no such
+intermediates — and its $r$ terms are mutually independent, which is the
+parallelism the literature is actually buying.
+
+## Where it wins, and where it does not
+
+| spectrum | Newton | Zolotarev $r=8$ | verdict |
+|---|---|---|---|
+| **real** (symmetric, $N=200$) | 26 iters, 1.017 s | **3 iters, 0.115 s** | **8.8× faster** |
+| **complex** (Ginibre, $N=200$) | 14 iters, 0.155 s | 7 iters, 0.256 s | **1.7× slower** |
+
+Zolotarev is optimal on a *real interval* $\ell \le |x| \le 1$. A symmetric
+matrix's spectrum lies there and the approximation is superb. A general
+nonsymmetric matrix has eigenvalues spread through the complex plane, where
+the real-interval optimality simply does not apply: the iteration still
+converges (it remains a contraction toward the sign), but needs more passes
+*and* far more work per pass, and loses outright.
+
+This is why the Nakatsukasa–Freund title reads "the symmetric eigendecomposition
+and the SVD". **Zolotarev does not rescue SDC for the general problem**, and an
+earlier note in this repository suggesting it as the next step for the
+nonsymmetric case was wrong. For the general case the right published direction
+remains Bai–Demmel–Gu's *inverse-free* iteration (matrix multiplication and QR,
+no inversion), which is a different mechanism entirely.
+
+## A second, unlooked-for benefit on real spectra
+
+On the symmetric test the two methods disagreed about one eigenvalue, and
+**Zolotarev was right**: the true count of eigenvalues with $\mathrm{Re} > 0$
+is 58; Zolotarev returns 58 and Newton returns 59. That matrix has an
+eigenvalue at $1.4\times10^{-3}$ of the spectral radius — essentially on the
+splitting line — where Newton is still converging slowly. Accuracy exactly at
+the splitting line, the hardest place for any SDC, is the second thing the
+best-approximation property buys.
