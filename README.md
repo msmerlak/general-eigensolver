@@ -55,13 +55,21 @@ time, never correctness — unconverged IPT output is discarded and the target
 re-run on ARPACK. Measured: 6.4–9.1× on isolated targets, and 0.0% overhead
 when nothing qualifies. See [GENERAL.md](GENERAL.md).
 
-The screen is in fact not even *monotonic* — in a measured 4-target batch the
-column with the lowest ρ (0.042) was the only one to diverge while ρ = 0.096
-converged to 4.5e-15 — so no gate value could route that batch correctly.
-What makes the router sound is the **per-column outcome**: `ipt_eig_partial`
-reports `converged_cols` / `failed`, columns retire independently (one bad
-target no longer aborts its neighbours mid-flight), and the fallback re-runs
-only the targets that actually failed.
+The screen is in fact a *weak classifier*: over 576 columns (`bench_screen.py`)
+the highest ρ among converged targets is 22.9 and the lowest among divergent
+ones is 0.0068, so the classes overlap across three orders of magnitude and no
+threshold separates them. What makes the router sound is the **per-column
+outcome**: `ipt_eig_partial` reports `converged_cols` / `failed`, columns
+retire independently (one bad target no longer aborts its neighbours
+mid-flight), and the fallback re-runs only the targets that actually failed.
+
+It follows that the gate should be set by the *cost of being wrong*, not the
+accuracy of the screen — and that cost differs by orders of magnitude between
+regimes. `eig_partial` now picks it automatically and **accepts sparse input**:
+dense keeps the conservative 0.1 (measured: raising it loses, 0.023 s → 0.111 s
+at N=400), while sparse tries everything, because a fully wasted attempt costs
+0.4% of the fallback there. With automatic routing on sparse interior targets:
+**184× at N=2000, 1,766× at N=5000** versus ARPACK shift-invert.
 
 **Largest margin in the repository — large sparse, interior targets.** On
 sparse matrices with wide diagonal spread and weak coupling, interior targets
@@ -180,6 +188,8 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `src/ssj/sdc.py` — spectral divide and conquer (general, globally convergent)
 - `experiments_shear.py` — the shear/normality explorations
 - `bench_vs_lapack.py` — head-to-head against LAPACK
+- `bench_sparse.py` — the large-sparse win, and `--envelope` for its boundaries
+- `bench_screen.py` — how well the one-hop screen predicts convergence (badly)
 - `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures

@@ -1399,6 +1399,56 @@ four targets to ARPACK.
 `failed` alongside the scalar `converged` (which is now simply
 `converged_cols.all()`, so existing callers are unaffected).
 
+### How weak is the screen, and what gate follows from that
+
+Rather than argue from the one anecdote, `bench_screen.py` collects
+$(\rho_j, \text{converged}_j)$ over **576 columns** spanning sparse
+diagonally-dominant, dense near-diagonal and graded-spectrum families at a
+range of couplings. The classes overlap across more than three orders of
+magnitude:
+
+| $\rho$ decile | converged |
+|---|---|
+| 0.0001 – 0.0024 | 100% |
+| 0.0024 – 0.0118 | 91% |
+| 0.0118 – 0.0283 | 64% |
+| 0.052 – 0.091 | 43% |
+| 0.19 – 0.45 | 53% |
+| 1.70 – 8.11 | 10% |
+| 8.11 – 5953 | 3% |
+
+The highest $\rho$ among *converged* columns is 22.95; the lowest among
+*divergent* ones is 0.0068. No threshold separates them. At the gate of 0.1,
+294 columns are tried, 87 of those diverge, and **86 columns that would have
+converged are never attempted** — 29% of the available wins discarded.
+
+The useful conclusion is that **the gate should be set by the cost of being
+wrong, not by the accuracy of the screen** — and that cost is completely
+different in the two regimes:
+
+| | wasted attempt | missed win | right policy |
+|---|---|---|---|
+| **dense** | many $O(N^2k)$ iterations near the basin edge | one $O(N^3/3)$ shift-invert | gate low |
+| **sparse, interior** | a few $O(\mathrm{nnz})$ matvecs | an LU with fill-in up to 431× nnz | try everything |
+
+Measured, end to end. Dense ($N=400$, 16 targets, 14 of which do converge):
+gate 0.1 → **0.023 s**, gate 0.5 → 0.111 s, gate $\infty$ → 0.045 s. Trying
+*more* targets loses, because near the edge IPT needs many iterations while
+dense ARPACK is cheap and paid once. The conservative gate is correct here.
+
+Sparse: a **fully wasted** attempt — every target divergent, run until the
+detector fires — costs 4.9 ms against a 1.14 s fallback at $N=2000$, and
+59 ms against 15.7 s at $N=5000$. That is **0.4% of the fallback**, so
+screening out a winnable target is ~250× worse than trying one and failing.
+
+`eig_partial` therefore defaults `gate=None`, resolved per regime (0.1 dense,
+$\infty$ sparse), and now **accepts sparse input**, which it previously did
+not — so the repository's largest result is reachable through the dispatching
+API rather than only by calling `ipt_eig_partial` directly. Measured against
+ARPACK shift-invert with automatic routing: **184× at $N=2000$, 1,766× at
+$N=5000$**. On a batch where only three of four targets converge it routes
+3 → IPT and 1 → ARPACK and returns all four to 2.8e-16.
+
 **Detecting divergence promptly.** A blow-up test ($\|\Delta V\| > 10^3\times$
 its initial value) is a poor detector for a contraction factor just above 1:
 the error creeps rather than explodes, which is what made that row take 763

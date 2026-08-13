@@ -82,6 +82,53 @@ def test_sigma_targeting():
     assert e < 1e-12
 
 
+def _sparse_case(coupling, seed=5, n=2000):
+    import scipy.sparse as sp
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
+    from bench_sparse import sparse_diagonally_dominant
+    A0, d = sparse_diagonally_dominant(n, seed=seed)
+    A = (sp.diags(d) + coupling * (A0 - sp.diags(d))).tocsr()
+    return A, list(np.argsort(np.abs(d - np.median(d)))[:4])
+
+
+def test_accepts_sparse_input():
+    """The largest margin in the repository is on large sparse interior
+    targets, so the router has to accept sparse input without densifying it."""
+    A, cols = _sparse_case(1.0)
+    w, V, info = eig_partial(A, cols=cols, return_info=True)
+    assert info["path"] == "ipt"
+    nrm = float(np.max(np.abs(A.diagonal()))) + 1.0
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-12
+
+
+def test_gate_defaults_by_regime():
+    """A wasted attempt costs ~0.4% of the fallback when sparse and several
+    times the fallback when dense, so one gate cannot serve both."""
+    from ssj.dispatch import _auto_gate
+    A_sparse, _ = _sparse_case(1.0)
+    A_dense, _ = band_plus_impurities(60)
+    assert _auto_gate(A_sparse) == np.inf     # try everything: waste is free
+    assert _auto_gate(A_dense) == 0.1         # conservative: waste is not
+
+
+def test_sparse_mixed_and_hopeless_routing_stay_correct():
+    """Both sparse paths, against dense ground truth: a batch where only some
+    targets converge must fall back on exactly those that did not, and a batch
+    where none do must come back entirely from the fallback -- correct either
+    way, which is the property the router exists for."""
+    for coupling, want_path, want_ipt in ((80.0, "mixed", 3), (320.0, "arpack", 0)):
+        A, cols = _sparse_case(coupling)
+        Ad = np.asarray(A.todense())
+        ev = np.linalg.eigvalsh(Ad)
+        scale = np.linalg.norm(Ad, 2)
+        w, V, info = eig_partial(A, cols=cols, return_info=True, max_iter=400)
+        assert info["path"] == want_path, (coupling, info["path"])
+        assert info["n_ipt"] == want_ipt
+        for x in np.real(w):
+            assert np.min(np.abs(ev - x)) / scale < 1e-12
+        assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / scale < 1e-11
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
