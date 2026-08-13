@@ -42,6 +42,12 @@ w, V, info = ssj_eigh(A, return_info=True)   # info["sweeps"], info["history"], 
 Complex Hermitian matrices work with the same call (anti-Hermitian generator,
 unitary retraction).
 
+**GPU:** pass a CuPy array and the whole iteration runs on the device — the
+implementation is backend-agnostic between NumPy and CuPy. `method="gemm"` is
+the natural GPU choice (matmuls and elementwise maps only). `bench_gpu.py`
+measures SSJ against cuSOLVER's `syevd` on your GPU; see BENCHMARKS.md for
+what to expect and why the CPU verdict may reverse there.
+
 ### Methods
 
 | `method` | retraction | when to use |

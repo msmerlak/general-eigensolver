@@ -186,6 +186,40 @@ gemm-equivalents, ~20 gemms per tracking update is a 3–10× win, and even the
 cold-start gemm variant (~330 gemms at $N=1000$) reaches the boundary of that
 range. Unmeasured here — this container has no such accelerator.
 
+## GPU (arithmetic and a runnable benchmark, no measurement)
+
+The implementation is backend-agnostic: pass a CuPy array and every operation
+— angles, retractions, power iterations — runs on the device.
+`bench_gpu.py` measures, per size, the FP64 gemm time, cuSOLVER `syevd`
+(the incumbent, in gemm-equivalents), SSJ cold (`gemm` and `cholqr2`
+methods), and the warm-start tracking case against a cuSOLVER re-solve.
+
+What the measured gemm counts predict, against the 50–200 gemm-equivalent
+range RESULTS.md cites for accelerator eigensolves (dense symmetric
+eigensolvers on GPUs are factorization- and memory-bound; the published
+cuSOLVER/MAGMA ratios at $N\gtrsim8$k sit broadly in that range, growing
+with $N$):
+
+- **Cold start: likely still loses or at best breaks even.** ~10.4 raw gemms
+  per sweep × sweeps growing like $\log N$ gives ≈ 470–520 gemms at
+  $N=10$k — above the range unless `syevd` on the target GPU lands at the
+  very top of it. The honest expectation is a loss, closer than on CPU.
+- **Warm-start tracking: the credible win.** 1–5 sweeps ≈ 10–30 raw gemms
+  per update is 2–10× under the range, FP64 end to end, with no
+  factorization in the loop.
+- **CholeskyQR2 should reverse its CPU verdict** on GPU (its triangular
+  kernels are small next to its gemms there), making it the retraction to
+  try first for the cold-start case.
+- **Untested upside: mixed precision.** The linear phase needs no accuracy —
+  descent is monotone and each sweep re-derives its angles from a fresh
+  $B$ — so its gemms could run in TF32/FP16 (8–16× FP64 tensor-core
+  throughput) with FP64 reserved for the quadratic tail, compressing the
+  cold-start cost several-fold. The map's self-stabilization is unusually
+  suited to this; nothing here measures it.
+
+These are predictions from measured gemm counts plus published GPU ratios,
+not measurements; `bench_gpu.py` exists to replace them with numbers.
+
 ## Honest wall-clock context
 
 LAPACK `eigh` (dsyevd) solves the GOE $N=1000$ problem in 0.07 s on this box

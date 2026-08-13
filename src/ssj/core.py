@@ -21,6 +21,12 @@ X's accumulated orthogonality defect inside Y^H Y and corrects it each sweep;
 the factor form carries the defect forward and the iteration converges to a
 non-orthonormal basis (observed: apparent off(B) at 1e-13 with a true
 orthogonality error of X plateaued near 0.34).
+
+The implementation is backend-agnostic between NumPy and CuPy: pass a CuPy
+array and every operation dispatches to CuPy, so the whole iteration runs on
+the GPU (results come back as CuPy arrays). The "gemm" method is the natural
+GPU choice -- its only building blocks are matmuls and elementwise maps. See
+bench_gpu.py.
 """
 from __future__ import annotations
 
@@ -35,26 +41,37 @@ except ImportError:  # pragma: no cover
 __all__ = ["ssj_eigh", "off_frobenius"]
 
 
-def off_frobenius(B: np.ndarray) -> float:
+def _am(A):
+    """Array module (numpy or cupy) for A -- dispatch without importing cupy
+    unless a cupy array actually shows up."""
+    if type(A).__module__.partition(".")[0] == "cupy":  # pragma: no cover
+        import cupy
+        return cupy
+    return np
+
+
+def off_frobenius(B) -> float:
     """Frobenius norm of the off-diagonal part of B."""
-    off = B - np.diag(np.diag(B))
-    return float(np.linalg.norm(off, ord="fro"))
+    xp = _am(B)
+    off = B - xp.diag(xp.diag(B))
+    return float(xp.linalg.norm(off, ord="fro"))
 
 
-def _spectral_norm_estimate(A: np.ndarray, iters: int = 100) -> float:
+def _spectral_norm_estimate(A, iters: int = 100) -> float:
     """Estimate ||A||_2 by power iteration on the Hermitian matrix A.
 
     Deterministic start vector; a power-iteration estimate can only come in at
     or below the true norm, which makes the effective tolerance tighter, never
     looser. Avoids the O(N^3) SVD that an exact 2-norm would cost.
     """
+    xp = _am(A)
     n = A.shape[0]
-    v = 1.0 + 0.01 * np.arange(n)
-    v /= np.linalg.norm(v)
+    v = 1.0 + 0.01 * xp.arange(n)
+    v /= xp.linalg.norm(v)
     est = 0.0
     for _ in range(iters):
         w = A @ v
-        est = float(np.linalg.norm(w))
+        est = float(xp.linalg.norm(w))
         if est == 0.0:
             return 0.0
         v = w / est
@@ -68,40 +85,44 @@ def _angles(B: np.ndarray) -> np.ndarray:
     anti-Hermitian by construction. Conventions at the singular points:
     zero gap -> +-pi/4 * phase(B_ij); B_ij = 0 -> 0.
     """
+    xp = _am(B)
     n = B.shape[0]
-    d = np.real(np.diag(B))
-    absB = np.abs(B)
+    d = xp.real(xp.diag(B))
+    absB = xp.abs(B)
     gap = d[None, :] - d[:, None]  # gap_ij = d_j - d_i, exactly antisymmetric
     with np.errstate(divide="ignore", invalid="ignore"):
-        theta = 0.5 * np.arctan(2.0 * absB / gap)
+        theta = 0.5 * xp.arctan(2.0 * absB / gap)
     # 0/0 (B_ij = 0 at zero gap): no rotation.
-    theta = np.nan_to_num(theta, nan=0.0)
+    theta = xp.nan_to_num(theta, nan=0.0)
     # Zero gap with B_ij != 0: the angle saturates at +-pi/4, but the raw
     # formula gives +pi/4 on BOTH (i,j) and (j,i) (each sees a +0 gap), which
     # breaks anti-Hermiticity -- orient the tie by the triangle instead.
     tie = (gap == 0.0) & (absB > 0.0)
-    if tie.any():
-        upper = np.triu(np.ones((n, n)), 1) - np.tril(np.ones((n, n)), -1)
-        theta = np.where(tie, (np.pi / 4.0) * upper, theta)
-    if np.iscomplexobj(B):
-        phase = np.divide(B, absB, out=np.zeros_like(B), where=absB > 0)
+    if bool(tie.any()):
+        upper = xp.triu(xp.ones((n, n)), 1) - xp.tril(xp.ones((n, n)), -1)
+        theta = xp.where(tie, (np.pi / 4.0) * upper, theta)
+    if B.dtype.kind == "c":
+        nonzero = absB > 0
+        phase = xp.where(nonzero, B / xp.where(nonzero, absB, 1.0), 0.0)
     else:
-        phase = np.sign(B)
+        phase = xp.sign(B)
     K = theta * phase
-    np.fill_diagonal(K, 0.0)
+    xp.fill_diagonal(K, 0.0)
     return K
 
 
 def _orth_qr(M: np.ndarray) -> np.ndarray:
     """Orthonormal factor of M via QR, sign-fixed so diag(R) > 0 (the branch
     continuously connected to the identity)."""
-    Q, R = np.linalg.qr(M)
-    d = np.diag(R).copy()
-    if np.iscomplexobj(d):
-        ph = np.divide(d, np.abs(d), out=np.ones_like(d), where=np.abs(d) > 0)
+    xp = _am(M)
+    Q, R = xp.linalg.qr(M)
+    d = xp.diag(R).copy()
+    if d.dtype.kind == "c":
+        absd = xp.abs(d)
+        ph = xp.where(absd > 0, d / xp.where(absd > 0, absd, 1.0), 1.0)
     else:
-        ph = np.sign(d)
-        ph[ph == 0] = 1.0
+        ph = xp.sign(d)
+        ph = xp.where(ph == 0, 1.0, ph)
     return Q * ph
 
 
@@ -118,17 +139,20 @@ def _orth_cholqr2(M: np.ndarray) -> np.ndarray:
     factorizations, e.g. GPUs); on the CPU stack used for BENCHMARKS.md it
     measured ~3x slower, so it is an option, not the default.
     """
+    xp = _am(M)
     for _ in range(2):
         G = M.conj().T @ M
-        R = np.linalg.cholesky(G).conj().T  # upper triangular
-        if _HAVE_SCIPY:
+        R = xp.linalg.cholesky(G).conj().T  # upper triangular
+        if xp is np and _HAVE_SCIPY:
             trtri = _lapack.ztrtri if np.iscomplexobj(R) else _lapack.dtrtri
             Rinv, info = trtri(R, lower=0)
             if info != 0:  # pragma: no cover
                 raise np.linalg.LinAlgError("trtri failed in CholeskyQR2")
             M = M @ Rinv
         else:  # pragma: no cover
-            M = np.linalg.solve(R.conj().T, M.conj().T).conj().T
+            # R is well-conditioned here (see docstring), so a general inverse
+            # is numerically safe and keeps the operation gemm-shaped on GPU
+            M = M @ xp.linalg.inv(R)
     return M
 
 
@@ -138,14 +162,15 @@ def _orth_ns_adaptive(Y: np.ndarray, target: float, max_iter: int = 60) -> tuple
     Returns (Y, gemm_count). Each iteration's Y^H Y doubles as the error
     monitor. Requires sigma(Y) < sqrt(3) on entry.
     """
+    xp = _am(Y)
     n = Y.shape[0]
-    eye = np.eye(n)
+    eye = xp.eye(n)
     gemms = 0
     prev = np.inf
     for _ in range(max_iter):
         G = Y.conj().T @ Y
         gemms += 1
-        dev = np.linalg.norm(G - eye, ord="fro")
+        dev = float(xp.linalg.norm(G - eye, ord="fro"))
         if dev < target or dev > 0.9 * prev:  # done, or stagnated at roundoff
             break
         prev = dev
@@ -156,13 +181,14 @@ def _orth_ns_adaptive(Y: np.ndarray, target: float, max_iter: int = 60) -> tuple
 
 def _power_iter_norm_antisym(K: np.ndarray, iters: int = 30) -> float:
     """Estimate ||K||_2 for anti-Hermitian K by power iteration on K^H K."""
+    xp = _am(K)
     n = K.shape[0]
-    v = 1.0 + 0.01 * np.arange(n)
-    v /= np.linalg.norm(v)
+    v = 1.0 + 0.01 * xp.arange(n)
+    v /= xp.linalg.norm(v)
     est = 0.0
     for _ in range(iters):
         w = K.conj().T @ (K @ v)
-        est = float(np.linalg.norm(w))
+        est = float(xp.linalg.norm(w))
         if est == 0.0:
             return 0.0
         v = w / est
@@ -212,28 +238,29 @@ def ssj_eigh(
     V : (n, n) orthonormal eigenvectors, V[:, k] for w[k].
     info : dict, only when return_info=True.
     """
-    A = np.asarray(A)
+    xp = _am(A)
+    A = xp.asarray(A)
     if A.ndim != 2 or A.shape[0] != A.shape[1]:
         raise ValueError("A must be square")
-    if not np.iscomplexobj(A):
+    if A.dtype.kind != "c":
         A = A.astype(np.float64, copy=False)
 
     n = A.shape[0]
     norm_A = _spectral_norm_estimate(A)
     if norm_A == 0.0:  # zero matrix
-        w = np.zeros(n)
-        V = np.eye(n)
+        w = xp.zeros(n)
+        V = xp.eye(n)
         return (w, V, {"sweeps": 0, "history": [0.0], "converged": True,
                        "gemms": 0, "norm_A": 0.0}) if return_info else (w, V)
 
     if X0 is None:
-        X = np.eye(n, dtype=A.dtype)
+        X = xp.eye(n, dtype=A.dtype)
     else:
-        X0 = np.asarray(X0)
+        X0 = xp.asarray(X0)
         if X0.shape != (n, n):
             raise ValueError("X0 must match the shape of A")
         X = _orth_qr(X0.astype(A.dtype, copy=False))
-    eye = np.eye(n, dtype=A.dtype)
+    eye = xp.eye(n, dtype=A.dtype)
     history: list[float] = []
     gemms = 0
     converged = False
@@ -254,7 +281,7 @@ def ssj_eigh(
         if method == "qr":
             X = _orth_qr(Y)
         elif method in ("auto", "cholqr2"):
-            if np.linalg.norm(K, ord="fro") < ns_switch:
+            if float(xp.linalg.norm(K, ord="fro")) < ns_switch:
                 # Adaptive-depth Newton-Schulz endgame. A single fixed NS step
                 # (as in the original spec) leaves an O(||K||^4) orthogonality
                 # defect that the last sweep never corrects; on graded spectra
@@ -290,8 +317,10 @@ def ssj_eigh(
         B = (B + B.conj().T) / 2.0
         history.append(off_frobenius(B) / norm_A)
 
-    w = np.real(np.diag(B))
-    order = np.argsort(w, kind="stable")
+    w = xp.real(xp.diag(B))
+    # cupy's argsort takes no `kind`; numpy keeps the stable sort for
+    # reproducible ordering within degenerate clusters
+    order = np.argsort(w, kind="stable") if xp is np else xp.argsort(w)
     w = w[order]
     V = X[:, order]
 
