@@ -29,8 +29,18 @@ during reimplementation and several confirmed negative results, are in
 The repository also implements **IPT** (Iterative Perturbation Theory), a
 one-gemm-per-iteration fixed point for near-diagonal input, and the
 **SSJ→IPT hybrid** that uses SSJ's global basin to feed IPT's cheap endgame.
-On strongly diagonally dominant matrices IPT **beats LAPACK `dsyevd` by
-1.4–1.9×** at full accuracy — see [BENCHMARKS.md](BENCHMARKS.md).
+Where LAPACK is beaten, at full accuracy:
+
+| problem | input | vs LAPACK | measured |
+|---|---|---|---|
+| symmetric | near-diagonal ($\rho \lesssim 0.03$) | **1.4–1.9×** faster than `dsyevd` | [BENCHMARKS.md](BENCHMARKS.md) |
+| **general** | near-diagonal ($\rho \lesssim 0.1$) | **4–12×** faster than `dgeev` | [GENERAL.md](GENERAL.md) |
+
+Both wins are *dispatchable*: applicability is decided by
+$\rho = \max|W_{ij}|/|d_i-d_j|$, which `ipt_rate` computes in $O(N^2)$ —
+free next to a single gemm — so a caller can pick IPT or LAPACK correctly
+every time. [GENERAL.md](GENERAL.md) also records what does **not** work for
+nonsymmetric matrices, and why.
 
 ## Usage
 
@@ -38,8 +48,15 @@ On strongly diagonally dominant matrices IPT **beats LAPACK `dsyevd` by
 import numpy as np
 from ssj import ssj_eigh, ipt_eigh, ssj_ipt_eigh
 
-# near-diagonal input: IPT converges in a handful of gemms, beating LAPACK
+# near-diagonal symmetric input: a handful of gemms, beating dsyevd
 w, V = ipt_eigh(A_near_diagonal)
+
+# GENERAL (nonsymmetric) near-diagonal input: 4-12x faster than dgeev
+w, V = ipt_eig(A_general)          # eigenvectors are NOT orthogonal
+
+# is IPT applicable? O(N^2), free next to a gemm
+from ssj.ipt import ipt_rate
+use_ipt = ipt_rate(A) < 0.5
 
 # any symmetric input: SSJ globalizes, IPT finishes cheaply
 w, V = ssj_ipt_eigh(A)
@@ -87,7 +104,11 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `validate.py` — reproduces the convergence battery and scaling table from RESULTS.md
 - `experiments.py` — mechanism experiments: trajectory, monotonicity, and controlled divergence of the variants that remove a saturation
 - `tests/test_ssj.py` — correctness tests (run with `pytest` or directly)
+- `src/ssj/ipt.py` — IPT and the SSJ->IPT hybrid (symmetric and general)
+- `bench_vs_lapack.py` — head-to-head against LAPACK
+- `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
 - `ALGORITHM.md` — algorithm specification + implementation notes
+- `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
 - `RESULTS.md` — original measured results (Julia reference implementation)
 - `BENCHMARKS.md` — measurements of this implementation
 

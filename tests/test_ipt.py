@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from ssj import ipt_eigh, ssj_ipt_eigh  # noqa: E402
+from ssj import ipt_eigh, ipt_eig, ssj_ipt_eigh  # noqa: E402
 from ssj.ipt import ipt_rate  # noqa: E402
 
 
@@ -113,6 +113,46 @@ def test_ipt_complex_hermitian():
     w, V, info = ipt_eigh(A, return_info=True)
     assert info["converged"]
     check(A, w, V)
+
+
+def test_ipt_general_nonsymmetric():
+    """IPT on a general (nonsymmetric) near-diagonal matrix."""
+    rng = np.random.default_rng(10)
+    n = 80
+    W = rng.standard_normal((n, n))
+    np.fill_diagonal(W, 0.0)
+    A = np.diag(np.arange(n, dtype=float)) + 0.01 * W / np.max(np.abs(W))
+    w, V, info = ipt_eig(A, return_info=True)
+    assert info["converged"] and info["iters"] <= 8
+    norm2 = np.linalg.norm(A, ord=2)
+    # eigenvalues match LAPACK (spectrum is real in this regime)
+    assert np.max(np.abs(np.sort(w.real) - np.sort(np.linalg.eigvals(A).real))) \
+        / norm2 < 1e-12
+    assert np.max(np.abs(w.imag)) / norm2 < 1e-12
+    # residual, with NO orthogonality expected of V
+    assert np.linalg.norm(A @ V - V * w, "fro") / norm2 < 1e-11
+
+
+def test_ipt_general_does_not_orthogonalize():
+    """Eigenvectors of a nonsymmetric matrix are not orthogonal; the solver
+    must not force them to be (that would be a wrong answer, not a slow one)."""
+    rng = np.random.default_rng(11)
+    n = 60
+    W = rng.standard_normal((n, n))
+    np.fill_diagonal(W, 0.0)
+    A = np.diag(np.arange(n, dtype=float)) + 0.2 * W / np.max(np.abs(W))
+    w, V, info = ipt_eig(A, return_info=True)
+    assert info["converged"]
+    off_orth = np.linalg.norm(V.conj().T @ V - np.eye(n), "fro")
+    assert off_orth > 1e-6, "V came back orthogonal; symmetry was assumed somewhere"
+    assert np.linalg.norm(A @ V - V * w, "fro") / np.linalg.norm(A, 2) < 1e-11
+
+
+def test_ipt_general_reports_divergence():
+    rng = np.random.default_rng(12)
+    A = rng.standard_normal((60, 60))  # Ginibre: far outside the basin
+    _, _, info = ipt_eig(A, return_info=True)
+    assert not info["converged"]
 
 
 if __name__ == "__main__":
