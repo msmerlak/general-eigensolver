@@ -864,3 +864,65 @@ Anderson lattice with $M$ = intra-row hopping, no disorder from 4 to 20
 converges: a genuinely two-dimensional coupling is not modelled by one lattice
 direction. The case that defeated every other method in this document defeats
 this one too.
+
+
+---
+
+# A zoo of rewritings
+
+Rather than reason about which reformulation of $Av = \lambda v$ should be
+better, here are seven, all given the same matrix, target and tolerance
+(`experiments_zoo.py`). Symmetric near-diagonal, $N=300$, target mid-spectrum:
+
+| coupling | IPT | +Rayleigh λ | damped β=½ | +Aitken | self-energy(λ) | Richardson |
+|---|---|---|---|---|---|---|
+| 0.5 | 21 its | 21 its | 48 its | 101 its | diverges | diverges |
+| 2 | **div** | div | **123 its** | div | div | div |
+| 8+ | div | div | div | div | div | div |
+
+Mostly nothing. Taking $\lambda$ from the Rayleigh quotient instead of the
+$j$-th row changes not one iteration. Aitken extrapolation on the iterate
+sequence costs 5× and buys nothing. The scalar self-consistent second-order
+self-energy $\lambda = d_j + \sum_k |W_{jk}|^2/(\lambda - d_k)$ — appealingly
+cheap at $O(N)$ per step — diverges even where IPT converges, because the poles
+at every $d_k$ make it wildly non-monotone. Plain Richardson never had a chance
+at an interior target.
+
+**Damping is the one cheap win**: $v \leftarrow v + \beta(T(v)-v)$ with
+$\beta = \tfrac12$ converges at coupling 2 where undamped IPT diverges, at the
+price of ~2× the iterations where both work. One line of code for a 4× basin.
+
+## The rewriting that actually worked: Davidson
+
+The winner is not a rearrangement of the *formula* but of what is done with it.
+IPT applies the diagonal resolvent to the whole vector and **replaces** the
+iterate. Davidson applies the identical resolvent to the **residual only**,
+
+$$t = (\lambda I - D)^{-1}\left(Au - \lambda u\right)$$
+
+then appends $t$ to a subspace and takes the best vector available by
+Rayleigh–Ritz. Same preconditioner; the correction **accumulates instead of
+replacing**. The near-degenerate levels that defeat IPT — because their terms
+dominate the perturbation sum — are simply resolved by the small Rayleigh–Ritz
+eigenproblem. It is block IPT's medicine, with the block built automatically
+from whatever directions the residual explores.
+
+| coupling | IPT | **Davidson** | eig err | resid |
+|---|---|---|---|---|
+| 0.5 | 21 its | **14 its** | 7.6e-16 | 6.3e-14 |
+| 2 | **diverges** | **29 its** | 1.9e-16 | 8.0e-14 |
+| 8 | **diverges** | **96 its** | 3.6e-16 | 5.3e-14 |
+| 30 | diverges | diverges | (2.6e-5) | 1.1e-1 |
+
+**~16× wider basin than IPT, and faster inside it** — the first variant here
+that improves both at once, where blocking bought basin only in linear
+proportion to cost.
+
+Two mistakes worth recording, both of which first made Davidson look like a
+failure. The correction must be reorthogonalized **twice** — a single
+Gram–Schmidt pass loses orthogonality as the subspace grows. And the residual
+test must be **relative**: with $\|A\| \approx 300$ an absolute $10^{-12}$
+threshold reported divergence on runs that had reached machine precision
+(measured eigenvalue error 9.4e-17 on a "failed" run). Both were harness bugs
+masquerading as negative results, which is the failure mode this whole survey
+is most exposed to.
