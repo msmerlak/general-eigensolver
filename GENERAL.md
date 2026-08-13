@@ -793,3 +793,74 @@ right tool for is the case where **the projector is the answer** — a density
 matrix in linear-scaling electronic structure, an invariant subspace for
 deflation or tracking — where eigenvectors are never formed at all, and where
 the global basin plus the all-gemm diet is exactly what is wanted.
+
+
+---
+
+# Two creative attempts: one dead end, one large win
+
+## Anderson acceleration on IPT: no
+
+RESULTS.md records Anderson diverging on SSJ, and momentum failing there too —
+but both findings concern SSJ, whose stability *comes from* a saturation that
+extrapolation bypasses. IPT has no such mechanism to break: it is a plain
+fixed-point iteration with linear rate, which is what Anderson/DIIS was built
+for, and Anderson is a quasi-Newton method that can converge where the
+underlying iteration diverges. It looked like a direct attack on the basin.
+
+It is not. Dense near-diagonal, $N=400$:
+
+| coupling | plain IPT | Anderson $m{=}3$ | $m{=}8$ | $m{=}20$ |
+|---|---|---|---|---|
+| 0.5 | 13 its | 15 | 14 | 14 |
+| 2 – 50 | diverges | **diverges** | **diverges** | **diverges** |
+
+No basin extension at any depth, and slightly slower where IPT already works.
+IPT's divergence is not slow contraction that extrapolation repairs — it is a
+spectral instability with *many* unstable directions at once, and a depth-$m$
+quasi-Newton correction can absorb only $m$ of them.
+
+## Generalizing the splitting: yes, and by a lot
+
+IPT splits $A = D + W$ with $D$ the diagonal. **Nothing forces that choice.**
+For any easily-invertible $M$,
+
+$$(M - \lambda I)v = -(A-M)v \quad\Longrightarrow\quad
+v = -(M-\lambda I)^{-1}Rv, \qquad R = A - M$$
+
+with rate $\|(M-\lambda I)^{-1}R\|$ in place of $\|W\|/\text{gap}$. Plain
+IPT is $M = \mathrm{diag}(A)$. Choosing $M$ to model the dominant coupling —
+a band, a lattice direction, anything with a cheap solve — shrinks $R$ and so
+shrinks the rate.
+
+Two modes, and they are genuinely different algorithms rather than an
+implementation detail (found by getting it wrong first):
+
+- **reduced** excludes row `target` from the solve, since that row is what
+  determines $\lambda$. This is the strict IPT generalization and reproduces
+  plain IPT at $M = \mathrm{diag}(A)$.
+- **inverse** solves the full system and renormalizes. When $M - \lambda$ is
+  near-singular the solution aligns with its near-null direction — that is
+  **preconditioned inverse iteration**, where the near-singularity is the
+  *signal*, not a defect.
+
+$N=300$, strong band plus weak dense remainder:
+
+| band | plain IPT | reduced | **inverse ($M$ = band)** |
+|---|---|---|---|
+| 0.5 | 62 its | 72 its | **42 its** |
+| 2.0 | diverges | diverges | **61 its** |
+| 8.0 | diverges | diverges | **75 its** |
+| 30.0 | diverges | diverges | **118 its** |
+
+Plain IPT dies at band 0.5; inverse mode is still converging at band 30 at
+$10^{-16}$ — **a basin roughly 60× wider, the largest extension measured
+anywhere in this repository.**
+
+The limits are equally clear. Inverse mode *degenerates* with
+$M = \mathrm{diag}(A)$ (the single near-zero entry collapses the iterate onto
+$e_{\text{target}}$), so the two modes are not interchangeable. And on the 2D
+Anderson lattice with $M$ = intra-row hopping, no disorder from 4 to 20
+converges: a genuinely two-dimensional coupling is not modelled by one lattice
+direction. The case that defeated every other method in this document defeats
+this one too.
