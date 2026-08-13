@@ -731,3 +731,65 @@ the profitable band it is parameter-free and 2–5× faster than LAPACK; outside
 it gives up cheaply (the cap bounds the cost) and the caller falls back. That
 converts the earlier "guess the block size" into no parameter at all, which is
 what makes it usable in the `eig_partial` router.
+
+
+---
+
+# A different map: fixed points that are projectors, not eigenvectors
+
+Every map so far has an eigenvector or eigenbasis as its fixed point, and each
+pays the same tax. Power and gradient flows converge globally but only to
+spectral extremes, and only linearly. IPT and Newton-type maps are fast but
+locally convergent. Blocking widens IPT's basin but buys it linearly in cost.
+
+Changing the *object* escapes the tradeoff. Take idempotents as the fixed
+points:
+
+$$P \;\leftarrow\; 3P^2 - 2P^3 \;=\; P^2(3I - 2P)$$
+
+The scalar map $p(x) = 3x^2 - 2x^3$ satisfies $p(0)=0$, $p(1)=1$,
+$p(\tfrac12)=\tfrac12$, with $p'(0) = p'(1) = 0$ and $p'(\tfrac12) = \tfrac32$.
+So $0$ and $1$ are **superattracting** and $\tfrac12$ **repels**, and $p$ maps
+$[0,1]$ into itself. Scale $A$ linearly so its spectrum lands in $[0,1]$ with
+the splitting point $\mu$ at $\tfrac12$, and every eigenvalue below $\mu$ is
+driven to 1, every one above to 0 — **globally convergent, quadratic, and
+every operation a gemm.**
+
+This is McWeeny purification, the basis of linear-scaling electronic
+structure. Nothing here is new but its use as the SDC splitter.
+
+## It closes the break-even this document derived
+
+GENERAL.md's SDC section concluded: *the sign iteration must be inverse-free*.
+Newton's is not (an inverse costs 5.35 gemm-equivalents here). Newton–Schulz on
+the sign function is inverse-free but **not globally convergent** — it needs
+the spectrum already near $\pm1$. Purification is both, because the $[0,1]$
+scaling is a guarantee rather than a hope.
+
+Hermitian, splitting at the median:
+
+| $N$ | purification | Newton sign | **ratio** | rank | $\|P^2-P\|$ |
+|---|---|---|---|---|---|
+| 600 | 29 its, 57 gemms, **91.2 ge** | 15 its, **395.8 ge** | **4.34×** | 300.0000 (true 300) | 1.4e-13 |
+| 1200 | 31 its, 61 gemms, **90.1 ge** | 60 its, **579.6 ge** | **6.43×** | 600.0000 (true 600) | 2.9e-14 |
+
+Note the shape, not just the ratio: purification's cost is **flat** at ~90
+gemm-equivalents while Newton's *grows* (396 → 580), because Newton needs more
+iterations as the spectrum crowds the splitting line. The advantage widens
+with $N$.
+
+## Limitation, and honest placement
+
+The map needs the spectrum inside the real interval $[0,1]$, so it is
+**Hermitian-only**. A general matrix with complex eigenvalues cannot be scaled
+there and purification does not apply — the sign function still does. This is
+the same real-interval boundary that stopped Zolotarev from rescuing the
+general case, and it is worth noticing that two independent attempts at the
+nonsymmetric problem have now failed at exactly the same wall.
+
+And it does not make symmetric SDC beat LAPACK: `dsyevd` costs 15–18
+gemm-equivalents against purification's 90. What purification is genuinely the
+right tool for is the case where **the projector is the answer** — a density
+matrix in linear-scaling electronic structure, an invariant subspace for
+deflation or tracking — where eigenvectors are never formed at all, and where
+the global basin plus the all-gemm diet is exactly what is wanted.

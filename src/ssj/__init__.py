@@ -6,10 +6,12 @@ from .normal import normal_eig, normality_defect, shear_toward_normal
 from .sdc import sdc_eigvals, matrix_sign
 from .dispatch import eig_partial
 from .block_ipt import block_ipt_eig, adaptive_block_ipt_eig, choose_block
+from .purify import purify, spectral_projector, purify_split
 
 __all__ = ["ssj_eigh", "off_frobenius", "ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate_columns",
            "ssj_ipt_eigh", "refine_eig",
            "normal_eig", "normality_defect", "shear_toward_normal",
            "sdc_eigvals", "matrix_sign", "eig_partial", "block_ipt_eig", "adaptive_block_ipt_eig",
-           "choose_block"]
+           "choose_block", "purify", "spectral_projector",
+           "purify_split"]
 __version__ = "0.1.0"
