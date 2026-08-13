@@ -1,0 +1,290 @@
+"""Simultaneous Saturated Jacobi (SSJ) eigensolver.
+
+Full symmetric / Hermitian eigendecomposition by applying every classical
+Jacobi rotation angle at once through a single linearized step, followed by
+reprojection onto the orthogonal (unitary) manifold:
+
+    B = X^H A X,  d = diag(B)
+    K_ij = 1/2 * arctan( 2|B_ij| / (d_j - d_i) ) * phase(B_ij)   (anti-Hermitian)
+           saturating at +-pi/4 * phase(B_ij) when d_j = d_i
+    X <- orth( X (I + K) )
+
+Two saturations make the map self-stabilizing: the arctan bounds each pair
+angle by pi/4, and the reprojection of I + K (K anti-Hermitian) rotates each
+K-invariant plane by arctan(sigma_l) rather than sigma_l, saturating the
+*composed* step. Parameter-free; no pivoting, shifts, or deflation logic.
+
+IMPORTANT: the retraction is applied to the PRODUCT X(I+K), never as
+X @ orth(I+K). With an exact retraction the two coincide, but with the
+truncated Newton-Schulz of the gemm variant only the product form re-measures
+X's accumulated orthogonality defect inside Y^H Y and corrects it each sweep;
+the factor form carries the defect forward and the iteration converges to a
+non-orthonormal basis (observed: apparent off(B) at 1e-13 with a true
+orthogonality error of X plateaued near 0.34).
+"""
+from __future__ import annotations
+
+import numpy as np
+
+try:
+    from scipy.linalg import lapack as _lapack
+    _HAVE_SCIPY = True
+except ImportError:  # pragma: no cover
+    _HAVE_SCIPY = False
+
+__all__ = ["ssj_eigh", "off_frobenius"]
+
+
+def off_frobenius(B: np.ndarray) -> float:
+    """Frobenius norm of the off-diagonal part of B."""
+    off = B - np.diag(np.diag(B))
+    return float(np.linalg.norm(off, ord="fro"))
+
+
+def _spectral_norm_estimate(A: np.ndarray, iters: int = 100) -> float:
+    """Estimate ||A||_2 by power iteration on the Hermitian matrix A.
+
+    Deterministic start vector; a power-iteration estimate can only come in at
+    or below the true norm, which makes the effective tolerance tighter, never
+    looser. Avoids the O(N^3) SVD that an exact 2-norm would cost.
+    """
+    n = A.shape[0]
+    v = 1.0 + 0.01 * np.arange(n)
+    v /= np.linalg.norm(v)
+    est = 0.0
+    for _ in range(iters):
+        w = A @ v
+        est = float(np.linalg.norm(w))
+        if est == 0.0:
+            return 0.0
+        v = w / est
+    return est
+
+
+def _angles(B: np.ndarray) -> np.ndarray:
+    """Saturated Jacobi generator: K_ij = 1/2 arctan(2 B_ij / (d_j - d_i)).
+
+    B must be exactly Hermitian (symmetrize before calling); then K is exactly
+    anti-Hermitian by construction. Conventions at the singular points:
+    zero gap -> +-pi/4 * phase(B_ij); B_ij = 0 -> 0.
+    """
+    n = B.shape[0]
+    d = np.real(np.diag(B))
+    absB = np.abs(B)
+    gap = d[None, :] - d[:, None]  # gap_ij = d_j - d_i, exactly antisymmetric
+    with np.errstate(divide="ignore", invalid="ignore"):
+        theta = 0.5 * np.arctan(2.0 * absB / gap)
+    # 0/0 (B_ij = 0 at zero gap): no rotation.
+    theta = np.nan_to_num(theta, nan=0.0)
+    # Zero gap with B_ij != 0: the angle saturates at +-pi/4, but the raw
+    # formula gives +pi/4 on BOTH (i,j) and (j,i) (each sees a +0 gap), which
+    # breaks anti-Hermiticity -- orient the tie by the triangle instead.
+    tie = (gap == 0.0) & (absB > 0.0)
+    if tie.any():
+        upper = np.triu(np.ones((n, n)), 1) - np.tril(np.ones((n, n)), -1)
+        theta = np.where(tie, (np.pi / 4.0) * upper, theta)
+    if np.iscomplexobj(B):
+        phase = np.divide(B, absB, out=np.zeros_like(B), where=absB > 0)
+    else:
+        phase = np.sign(B)
+    K = theta * phase
+    np.fill_diagonal(K, 0.0)
+    return K
+
+
+def _orth_qr(M: np.ndarray) -> np.ndarray:
+    """Orthonormal factor of M via QR, sign-fixed so diag(R) > 0 (the branch
+    continuously connected to the identity)."""
+    Q, R = np.linalg.qr(M)
+    d = np.diag(R).copy()
+    if np.iscomplexobj(d):
+        ph = np.divide(d, np.abs(d), out=np.ones_like(d), where=np.abs(d) > 0)
+    else:
+        ph = np.sign(d)
+        ph[ph == 0] = 1.0
+    return Q * ph
+
+
+def _orth_cholqr2(M: np.ndarray) -> np.ndarray:
+    """CholeskyQR2: two rounds of G = M^H M, R = chol(G), M <- M R^{-1}.
+
+    Numerically safe here because sigma(X(I+K)) stays within a small factor of 1
+    (each singular value of I+K is sqrt(1 + sigma_l(K)^2) times X's near-unit
+    singular values), so the Gram matrix is well-conditioned; two rounds give
+    orthogonality at the level of one Householder QR. R^{-1} is formed with
+    trtri and applied by gemm, so the cost is two gemms per round plus two
+    small triangular routines. Whether this beats Householder QR is a property
+    of the BLAS/LAPACK build (it favors stacks where gemm far outruns
+    factorizations, e.g. GPUs); on the CPU stack used for BENCHMARKS.md it
+    measured ~3x slower, so it is an option, not the default.
+    """
+    for _ in range(2):
+        G = M.conj().T @ M
+        R = np.linalg.cholesky(G).conj().T  # upper triangular
+        if _HAVE_SCIPY:
+            trtri = _lapack.ztrtri if np.iscomplexobj(R) else _lapack.dtrtri
+            Rinv, info = trtri(R, lower=0)
+            if info != 0:  # pragma: no cover
+                raise np.linalg.LinAlgError("trtri failed in CholeskyQR2")
+            M = M @ Rinv
+        else:  # pragma: no cover
+            M = np.linalg.solve(R.conj().T, M.conj().T).conj().T
+    return M
+
+
+def _orth_ns_adaptive(Y: np.ndarray, target: float, max_iter: int = 60) -> tuple[np.ndarray, int]:
+    """Newton-Schulz iterated until ||Y^H Y - I||_F < target.
+
+    Returns (Y, gemm_count). Each iteration's Y^H Y doubles as the error
+    monitor. Requires sigma(Y) < sqrt(3) on entry.
+    """
+    n = Y.shape[0]
+    eye = np.eye(n)
+    gemms = 0
+    prev = np.inf
+    for _ in range(max_iter):
+        G = Y.conj().T @ Y
+        gemms += 1
+        dev = np.linalg.norm(G - eye, ord="fro")
+        if dev < target or dev > 0.9 * prev:  # done, or stagnated at roundoff
+            break
+        prev = dev
+        Y = Y @ (1.5 * eye - 0.5 * G)
+        gemms += 1
+    return Y, gemms
+
+
+def _power_iter_norm_antisym(K: np.ndarray, iters: int = 30) -> float:
+    """Estimate ||K||_2 for anti-Hermitian K by power iteration on K^H K."""
+    n = K.shape[0]
+    v = 1.0 + 0.01 * np.arange(n)
+    v /= np.linalg.norm(v)
+    est = 0.0
+    for _ in range(iters):
+        w = K.conj().T @ (K @ v)
+        est = float(np.linalg.norm(w))
+        if est == 0.0:
+            return 0.0
+        v = w / est
+    return float(np.sqrt(est))
+
+
+def ssj_eigh(
+    A: np.ndarray,
+    tol: float = 1e-13,
+    method: str = "auto",
+    max_sweeps: int = 1000,
+    ns_switch: float = 0.5,
+    gemm_cap: float = 1.0,
+    gemm_ns_factor: float = 0.05,
+    return_info: bool = False,
+):
+    """Eigendecomposition of a real symmetric or complex Hermitian matrix by
+    Simultaneous Saturated Jacobi sweeps.
+
+    Parameters
+    ----------
+    A : (n, n) symmetric / Hermitian ndarray.
+    tol : stop when ||offdiag(X^H A X)||_F <= tol * ||A||_2.
+    method :
+        "auto"    -- QR retraction, switching to a single Newton-Schulz step
+                     once ||K||_F < ns_switch (default; the spec's iteration).
+        "qr"      -- Householder QR retraction every sweep.
+        "cholqr2" -- CholeskyQR2 retraction every sweep (gemm-dominated,
+                     usually faster in wall time; same NS endgame as "auto").
+        "gemm"    -- factorization-free: spectral cap ||K||_2 <= gemm_cap, then
+                     Newton-Schulz iterated until
+                     ||Y^H Y - I||_F < gemm_ns_factor * off(B)/||A||_2.
+                     Every flop a gemm.
+    max_sweeps : hard cap on sweep count.
+    return_info : if True, also return a dict with keys "sweeps", "history"
+        (off(B)/||A||_2 before each retraction and at exit), "converged",
+        "gemms" (N^3-gemm count, "gemm" method only), "norm_A".
+
+    Returns
+    -------
+    w : (n,) real eigenvalues, ascending.
+    V : (n, n) orthonormal eigenvectors, V[:, k] for w[k].
+    info : dict, only when return_info=True.
+    """
+    A = np.asarray(A)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("A must be square")
+    if not np.iscomplexobj(A):
+        A = A.astype(np.float64, copy=False)
+
+    n = A.shape[0]
+    norm_A = _spectral_norm_estimate(A)
+    if norm_A == 0.0:  # zero matrix
+        w = np.zeros(n)
+        V = np.eye(n)
+        return (w, V, {"sweeps": 0, "history": [0.0], "converged": True,
+                       "gemms": 0, "norm_A": 0.0}) if return_info else (w, V)
+
+    X = np.eye(n, dtype=A.dtype)
+    eye = np.eye(n, dtype=A.dtype)
+    history: list[float] = []
+    gemms = 0
+    converged = False
+    sweeps = 0
+
+    for _ in range(max_sweeps):
+        B = X.conj().T @ (A @ X)
+        B = (B + B.conj().T) / 2.0  # exact Hermitian symmetry for the angle map
+        rel_off = off_frobenius(B) / norm_A
+        history.append(rel_off)
+        if rel_off <= tol:
+            converged = True
+            break
+
+        K = _angles(B)
+        Y = X @ (eye + K)  # = X + X @ K
+
+        if method == "qr":
+            X = _orth_qr(Y)
+        elif method in ("auto", "cholqr2"):
+            if np.linalg.norm(K, ord="fro") < ns_switch:
+                # Adaptive-depth Newton-Schulz endgame. A single fixed NS step
+                # (as in the original spec) leaves an O(||K||^4) orthogonality
+                # defect that the last sweep never corrects; on graded spectra
+                # the final K is not small even at convergence (tiny gaps keep
+                # angles alive while off(B) is already at tolerance), and the
+                # defect surfaces as an O(1e-9) orthogonality error in the
+                # output. The target here is the quadratic-tail scale
+                # rel_off^2: a defect below the square of the current error
+                # cannot disturb the error-squaring tail (a looser
+                # 0.05 * rel_off target was measured to stall the tail for a
+                # sweep and break monotonicity at the 1e-7 level). Each NS
+                # iteration contracts the defect quadratically, so this costs
+                # ~2 extra gemms per endgame sweep -- still well below a QR
+                # factorization; the stagnation guard floors an unreachably
+                # tight target at roundoff.
+                X, _ = _orth_ns_adaptive(Y, target=rel_off * rel_off)
+            else:
+                X = _orth_qr(Y) if method == "auto" else _orth_cholqr2(Y)
+        elif method == "gemm":
+            gemms += 3  # B (2 gemms) + X @ K (1 gemm)
+            sigma = _power_iter_norm_antisym(K)
+            if sigma > gemm_cap:
+                K = K * (gemm_cap / sigma)
+                Y = X @ (eye + K)
+                gemms += 1
+            X, ns_gemms = _orth_ns_adaptive(Y, target=gemm_ns_factor * rel_off)
+            gemms += ns_gemms
+        else:
+            raise ValueError(f"unknown method {method!r}")
+        sweeps += 1
+    else:
+        B = X.conj().T @ (A @ X)
+        B = (B + B.conj().T) / 2.0
+        history.append(off_frobenius(B) / norm_A)
+
+    w = np.real(np.diag(B))
+    order = np.argsort(w, kind="stable")
+    w = w[order]
+    V = X[:, order]
+
+    if return_info:
+        return w, V, {"sweeps": sweeps, "history": history, "converged": converged,
+                      "gemms": gemms, "norm_A": norm_A}
+    return w, V
