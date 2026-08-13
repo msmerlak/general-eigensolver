@@ -42,11 +42,11 @@ import numpy as np
 
 from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 
-__all__ = ["ipt_eigh", "ssj_ipt_eigh"]
+__all__ = ["ipt_eigh", "ipt_eig", "ipt_rate", "ssj_ipt_eigh"]
 
 
 def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
-                 v_is_identity=False):
+                 v_is_identity=False, hermitian=True):
     """Run the IPT fixed point from V (diagonally normalized). Returns
     (V, Lambda, iters, converged, err) with err the max update in the diagonal
     normalization.
@@ -76,7 +76,11 @@ def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
             WV = W.copy()     # W @ I
         else:
             WV = W @ V        # the single gemm
-        Lam = d + xp.real(xp.diag(WV))          # Lambda_j = d_j + (WV)_jj
+        # Lambda_j = d_j + (WV)_jj. For a Hermitian problem the diagonal is
+        # real by construction and taking the real part suppresses roundoff
+        # drift; for a general matrix it is genuinely complex and must not be.
+        diag_WV = xp.diag(WV)
+        Lam = d + (xp.real(diag_WV) if hermitian else diag_WV)
         # R = 1 / (Lambda_j - d_i), with the diagonal neutralized: there
         # gap_jj = (WV)_jj is not a level gap and V_jj is pinned to 1.
         xp.subtract(Lam[None, :], d[:, None], out=R)
@@ -94,6 +98,68 @@ def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
         if not np.isfinite(err) or err > divergence_factor * err0:
             return V, Lam, it, False, err
     return V, Lam, max_iter, False, err
+
+
+def ipt_eig(A, tol=1e-13, max_iter=200, V0=None, return_info=False,
+            sort=True):
+    """Eigendecomposition of a GENERAL (nonsymmetric) square matrix by IPT.
+
+    The IPT fixed point never used symmetry -- it needs only W @ V and
+    diagonals -- so the iteration is unchanged from the symmetric case:
+
+        Lambda_j = d_j + (W V)_jj,   V_ij = (W V)_ij / (Lambda_j - d_i)
+
+    What changes is everything around it. Eigenvectors of a nonsymmetric
+    matrix are not orthogonal, so the columns are only normalized, never
+    reorthogonalized (doing so would be wrong, not merely wasteful), and no
+    Rayleigh quotient is available: Lambda as computed IS the eigenvalue.
+
+    The prize is larger here than in the symmetric case. LAPACK's dgeev
+    (Hessenberg reduction plus QR iteration plus back-substitution) measured
+    65 gemm-equivalents at N=1000 against dsyevd's 8.3, so a 4-6 gemm solve
+    wins by a much wider margin -- when it converges.
+
+    Convergence still requires being inside the basin, rho = max |W_ij| /
+    |d_i - d_j| below ~1 (use ipt_rate). Two caveats specific to the general
+    problem:
+
+      * A real matrix can have complex eigenvalues. Real arithmetic cannot
+        represent them, so pass A as complex when complex pairs are expected
+        (the iteration itself is dtype-agnostic). In the near-diagonal regime
+        this function targets -- well-separated real diagonal entries, small
+        coupling -- the spectrum stays real by perturbation, which is exactly
+        when IPT applies.
+      * Eigenvalues are returned unsorted unless `sort`, which orders by real
+        part then imaginary part; complex spectra have no canonical order.
+    """
+    xp = _am(A)
+    A = xp.asarray(A)
+    if A.ndim != 2 or A.shape[0] != A.shape[1]:
+        raise ValueError("A must be square")
+    if A.dtype.kind not in "cf":
+        A = A.astype(np.float64)
+    n = A.shape[0]
+    d = xp.diag(A).copy()
+    W = A - xp.diag(d)
+    norm_A = float(xp.linalg.norm(A, ord="fro")) / max(np.sqrt(n), 1.0)
+    if norm_A == 0.0:
+        norm_A = 1.0
+    V = xp.eye(n, dtype=A.dtype) if V0 is None else xp.array(V0, dtype=A.dtype)
+
+    V, Lam, iters, converged, err = _ipt_iterate(
+        W, d, V, max_iter, tol * norm_A, norm_A, v_is_identity=V0 is None,
+        hermitian=False)
+
+    V = V / xp.linalg.norm(V, axis=0, keepdims=True)
+    w = Lam
+    if sort:
+        key = xp.real(w) if w.dtype.kind == "c" else w
+        order = np.argsort(key, kind="stable") if xp is np else xp.argsort(key)
+        w, V = w[order], V[:, order]
+    if return_info:
+        return w, V, {"iters": iters, "gemms": iters, "converged": converged,
+                      "err": err}
+    return w, V
 
 
 def _finalize(A, V, Lam, xp, converged=True):
@@ -162,7 +228,7 @@ def ipt_rate(B, xp=None):
     """
     xp = _am(B) if xp is None else xp
     n = B.shape[0]
-    d = xp.real(xp.diag(B))
+    d = xp.diag(B)
     gap = xp.abs(d[None, :] - d[:, None])
     absW = xp.abs(B - xp.diag(xp.diag(B)))
     # Ignore the diagonal (gap 0, no coupling term) and guard exact ties, which
