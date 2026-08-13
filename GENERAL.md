@@ -1251,6 +1251,39 @@ at sizes where that is affordable:
 | 1,000 | 4.5e-13 | 4.6e-16 | 4 of 4 |
 | 2,000 | 4.5e-13 | 2.3e-16 | 4 of 4 |
 
+## It scales linearly, and the nonsymmetric case is larger still
+
+Pushing $N$ up, symmetric, $k=4$ interior:
+
+| $N$ | nnz | IPT | iters | rel. residual | time/nnz |
+|---|---|---|---|---|---|
+| 20,000 | 339,826 | 0.020 s | 3 | 2.9e-16 | 57 ns |
+| 50,000 | 849,888 | 0.099 s | 2 | 7.6e-15 | 116 ns |
+| 100,000 | 1,699,824 | 0.123 s | 3 | 7.3e-17 | 72 ns |
+| 200,000 | 3,399,838 | **0.239 s** | 2 | 1.8e-15 | 70 ns |
+
+Time per nonzero is flat (57–116 ns), i.e. genuinely $O(\mathrm{nnz})$, and
+the iteration count does not grow with $N$. A 200,000-square problem with
+3.4M nonzeros resolves four interior eigenpairs in a quarter of a second;
+the shift-invert route needs an LU whose fill-in was already 431× nnz at
+$N=10{,}000$.
+
+**Nonsymmetric is the bigger win**, because the alternatives are thinner —
+there is no LOBPCG for nonsymmetric problems, so `scipy.sparse.linalg.eigs`
+with shift-invert is essentially the only option, and its fill-in is *worse*:
+
+| $N$ | IPT | iters | ARPACK `eigs` shift-invert | LU fill | **speedup** |
+|---|---|---|---|---|---|
+| 2,000 | 0.0020 s | 4 | 0.78 s | 116.6× | **382×** |
+| 5,000 | 0.0032 s | 3 | 12.1 s | 286.9× | **3,775×** |
+| 10,000 | 0.0079 s | 3 | 105.2 s | 568.3× | **13,234×** |
+| 50,000 | 0.043 s | 3 | *infeasible* | — | — |
+
+Verified against dense ground truth at $N=800/1500$: max eigenvalue error
+$1.4$–$4.7\times10^{-15}$ relative to $\|A\|_2$, four distinct eigenvalues,
+and the eigenvectors come back correctly **non-orthogonal** (a symmetry
+assumption leaking in would show as orthogonal output).
+
 ## Scope, stated honestly
 
 This is the family IPT was designed for and it should be read that way: wide

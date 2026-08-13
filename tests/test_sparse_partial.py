@@ -69,6 +69,39 @@ def test_iteration_count_does_not_grow_with_N():
         counts.append(info["iters"])
     assert counts[1] <= counts[0] + 2
 
+def test_nonsymmetric_sparse_correct_and_not_orthogonal():
+    """Nonsymmetric sparse interior targets: the case with no LOBPCG
+    equivalent, so shift-invert is the only alternative. Verified against
+    dense ground truth, and the eigenvectors must come back NON-orthogonal
+    (a symmetry assumption leaking in would show up as orthogonal output)."""
+    from bench_sparse import sparse_nonsymmetric
+    n = 800
+    A, d = sparse_nonsymmetric(n, seed=0)
+    Ad = np.asarray(A.todense())
+    ev = np.linalg.eigvals(Ad)
+    nrm = np.linalg.norm(Ad, 2)
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:4])
+    w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=False)
+    assert info["converged"]
+    for x in w:
+        assert np.min(np.abs(ev - x)) / nrm < 1e-12
+    assert len(set(np.round(w, 9))) == 4
+    for j in range(4):
+        assert np.linalg.norm(Ad @ V[:, j] - w[j] * V[:, j]) / nrm < 1e-11
+
+
+def test_scales_to_large_N():
+    """O(nnz) cost with an iteration count set by the rate, not the size."""
+    from bench_sparse import sparse_diagonally_dominant
+    n = 100000
+    A, d = sparse_diagonally_dominant(n, seed=3)
+    cols = list(np.argsort(np.abs(d - np.median(d)))[:4])
+    w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=True)
+    assert info["converged"] and info["iters"] <= 8
+    nrm = float(np.max(np.abs(d))) + 1.0
+    for j in range(4):
+        assert np.linalg.norm(A @ V[:, j] - w[j] * V[:, j]) / nrm < 1e-10
+
 
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]

@@ -61,7 +61,11 @@ force Krylov methods into shift-invert, whose LU fill-in explodes on random
 sparsity (88× → 431× of nnz as N goes 2k → 10k, infeasible at 20k). IPT needs
 3–5 sparse matvecs and no factorization: **8× → 347× faster than the best
 alternative** (LOBPCG on the shifted-squared operator; ~20,000× vs ARPACK
-shift-invert), with the margin *growing* with N. See `bench_sparse.py`.
+shift-invert), with the margin *growing* with N. Cost is genuinely O(nnz):
+**N=200,000 with 3.4M nonzeros, four interior eigenpairs, 0.24 s.** The
+**nonsymmetric** case is larger still — no LOBPCG equivalent exists there, so
+shift-invert is the only alternative and its fill-in is worse: **382× → 13,234×**
+at N=2k → 10k. See `bench_sparse.py`.
 
 `window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
 purification (matmul only, no factorization, no target guess) with a

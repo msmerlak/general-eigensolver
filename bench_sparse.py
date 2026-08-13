@@ -30,7 +30,8 @@ import scipy.sparse as sp
 
 sys.path.insert(0, "src")
 warnings.filterwarnings("ignore")
-from scipy.sparse.linalg import LinearOperator, eigsh, lobpcg, splu  # noqa: E402
+from scipy.sparse.linalg import (LinearOperator, eigs, eigsh,  # noqa: E402
+                                  lobpcg, splu)
 
 from ssj import ipt_eig_partial  # noqa: E402
 
@@ -51,6 +52,25 @@ def sparse_diagonally_dominant(n, nnz_row=8, coupling=0.05, seed=0):
     vals = rng.standard_normal(m) * coupling
     W = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
     W = (W + W.T) * 0.5
+    W = W.tolil()
+    W.setdiag(0)
+    return (W.tocsr() + sp.diags(d)).tocsr(), d
+
+
+def sparse_nonsymmetric(n, nnz_row=8, coupling=0.05, seed=0):
+    """The same family without symmetrization. Harder in practice: for
+    nonsymmetric sparse interior targets there is no LOBPCG equivalent in
+    scipy, so shift-invert (scipy.sparse.linalg.eigs with sigma) is
+    essentially the only alternative -- and its fill-in is WORSE here than in
+    the symmetric case (measured 116.6x nnz at N=2000 rising to 568.3x at
+    N=10000)."""
+    rng = np.random.default_rng(seed)
+    d = rng.uniform(0, float(n), n)
+    m = nnz_row * n
+    rows = rng.integers(0, n, m)
+    cols = rng.integers(0, n, m)
+    vals = rng.standard_normal(m) * coupling
+    W = sp.coo_matrix((vals, (rows, cols)), shape=(n, n)).tocsr()
     W = W.tolil()
     W.setdiag(0)
     return (W.tocsr() + sp.diags(d)).tocsr(), d
@@ -118,3 +138,29 @@ if __name__ == "__main__":
               f'{tl:>9.3f}s {best/ti:>11.0f}x')
         print(f'        IPT {info["iters"]} its, relative residual {resid:.1e}',
               flush=True)
+
+    print()
+    print("NONSYMMETRIC (no LOBPCG equivalent exists; shift-invert is the "
+          "only alternative)")
+    print(f'{"N":>7} {"IPT":>10} {"its":>4} {"ARPACK eigs s-i":>16} '
+          f'{"LU fill":>9} {"speedup":>9}')
+    for n in [s_ for s_ in sizes if s_ <= 10000]:
+        A, d = sparse_nonsymmetric(n)
+        cols = list(np.argsort(np.abs(d - np.median(d)))[:4])
+        sigma = float(np.mean(d[cols]))
+        nrm = float(np.max(np.abs(d))) + 1.0
+        t0 = time.perf_counter()
+        w, V, info = ipt_eig_partial(A, cols, return_info=True, hermitian=False)
+        ti = time.perf_counter() - t0
+        ta, fill = float("nan"), float("nan")
+        try:
+            lu = splu((A - sigma * sp.eye(n)).tocsc())
+            fill = (lu.L.nnz + lu.U.nnz) / A.nnz
+            del lu
+            t0 = time.perf_counter()
+            eigs(A, k=4, sigma=sigma)
+            ta = time.perf_counter() - t0
+        except Exception:
+            ta = float("inf")
+        print(f'{n:>7} {ti:>9.4f}s {info["iters"]:>4} {ta:>15.3f}s '
+              f'{fill:>8.1f}x {ta/ti:>8.0f}x', flush=True)
