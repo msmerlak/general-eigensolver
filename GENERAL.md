@@ -413,3 +413,57 @@ eigenvalue at $1.4\times10^{-3}$ of the spectral radius — essentially on the
 splitting line — where Newton is still converging slowly. Accuracy exactly at
 the splitting line, the hardest place for any SDC, is the second thing the
 best-approximation property buys.
+
+
+---
+
+# Presolve + IPT refinement: the architecture is right, the presolve is missing
+
+A natural idea: rather than requiring A to be near-diagonal, *make* it so with
+a cheap inexact presolve, then let IPT refine. Two halves, measured separately.
+
+## Randomization is the wrong presolve
+
+Randomized methods are cheap because they exploit **low-rank** structure; a
+full eigendecomposition needs all N vectors, and a rank-N sketch costs what a
+full solve costs. There is also a subtlety specific to IPT: its map
+$V \leftarrow WV/(\Lambda - d)$ is defined by **A's own diagonal split**, so
+its contraction rate $\rho(A)$ is a property of A, *independent of the
+starting iterate*. A warm start cannot rescue a divergent map — the basis must
+actually change, which is why the tracking path forms $B = V^{\mathsf T} A V$
+first.
+
+## IPT is an excellent refinement engine
+
+`refine_eig(A, w0, V0)` changes basis into an approximate eigenframe and runs
+IPT there. Measured against a float32 LAPACK presolve on **dense Ginibre**
+matrices — far outside IPT's own basin, the frame is what puts it inside:
+
+| $N$ | presolve error | $\rho$ in that frame | IPT iters | refined error | resid |
+|---|---|---|---|---|---|
+| 200 | 2.9e-8 | 9.1e-7 | 2 | **5.1e-15** | 1.8e-14 |
+| 400 | 4.8e-8 | 8.2e-6 | 3 | **1.5e-14** | 4.7e-14 |
+
+Three iterations lift a float32 answer to full double precision. This
+generalizes IPT's role: not only a solver for near-diagonal input, but a
+refinement engine for *any* source of an approximate eigenbasis.
+
+## But there is no cheap presolve on this CPU
+
+| solver | time, $N=1000$ |
+|---|---|
+| `sgeev` (float32) | 0.905 s |
+| `dgeev` (float64) | 0.848 s |
+
+**Float32 is not faster.** `dgeev` is latency- and bandwidth-bound in its
+sequential Hessenberg reduction and QR sweeps, not flop-bound, so halving the
+precision buys nothing — the same inefficiency that made SDC attractive works
+against the presolve here. End to end the pipeline runs at 0.44–0.54× of
+`dgeev`, and the complex basis change (an inverse plus two gemms at ~4× real
+cost) takes the rest.
+
+So the architecture is sound and the refinement half is validated and cheap in
+iterations; what is missing is a presolve that is genuinely cheaper than a full
+solve. That exists on tensor-core hardware (float32/TF32 at 8–16× FP64), when
+tracking a slowly varying matrix, or whenever an application already holds a
+nearby eigenbasis — which is exactly when `refine_eig` should be reached for.

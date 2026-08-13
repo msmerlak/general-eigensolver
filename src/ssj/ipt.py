@@ -42,7 +42,7 @@ import numpy as np
 
 from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 
-__all__ = ["ipt_eigh", "ipt_eig", "ipt_rate", "ssj_ipt_eigh"]
+__all__ = ["ipt_eigh", "ipt_eig", "ipt_rate", "ssj_ipt_eigh", "refine_eig"]
 
 
 def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
@@ -340,3 +340,55 @@ def _with_target(kw, tol):
     out = dict(kw)
     out["tol"] = max(tol, 1e-3)
     return out
+
+
+def refine_eig(A, w0, V0, tol=1e-13, max_iter=50, return_info=False):
+    """Refine an APPROXIMATE eigendecomposition to full precision with IPT.
+
+    Given any approximate eigenpairs (w0, V0) of A -- from a float32 solve, a
+    previous timestep, a reduced-order model, a perturbative estimate -- this
+    changes basis into the approximate eigenframe, where A is near-diagonal by
+    construction, and runs IPT there.
+
+    Measured: a float32 LAPACK solve (eigenvalue error 6.4e-8) lands at
+    rho = 7e-6, deep inside IPT's basin, and THREE iterations take it to
+    7.3e-15 with residual 4.6e-14 -- full double precision.
+
+    This is the general form of IPT's role: not only a solver for
+    near-diagonal input, but a refinement engine for anything that produces an
+    approximate eigenbasis. Note where it does NOT pay, because the arithmetic
+    is unforgiving: refinement is cheap in ITERATIONS but the basis change
+    costs an inverse and two gemms in COMPLEX arithmetic (~4x real), so it only
+    wins when the presolve is genuinely much cheaper than a full solve. On this
+    CPU stack it is not -- LAPACK's sgeev measured 0.905 s against dgeev's
+    0.848 s, because dgeev is latency-bound in its sequential Hessenberg and QR
+    sweeps rather than flop-bound, so halving precision buys nothing. The
+    architecture pays where a cheap approximate solve genuinely exists:
+    tensor-core hardware, tracking a slowly varying matrix, or any application
+    that already has a nearby eigenbasis in hand.
+
+    Returns (w, V) refined, or (w, V, info) with info["converged"],
+    info["iters"] and info["rate"] (the measured IPT rate in the given frame,
+    which is the honest diagnostic for whether the presolve was good enough).
+    """
+    xp = _am(A)
+    A = xp.asarray(A)
+    n = A.shape[0]
+    cdtype = np.complex128 if A.dtype.itemsize > 4 else np.complex64
+    Ac = A.astype(cdtype)
+    V = xp.asarray(V0).astype(cdtype)
+
+    B = xp.linalg.solve(V, Ac @ V)
+    rate = ipt_rate(B, xp)
+    w, Vd, info = ipt_eig(B, tol=tol, max_iter=max_iter, return_info=True,
+                          sort=False)
+    Vfull = V @ Vd
+    Vfull = Vfull / xp.linalg.norm(Vfull, axis=0, keepdims=True)
+
+    key = xp.real(w)
+    order = np.argsort(key, kind="stable") if xp is np else xp.argsort(key)
+    w, Vfull = w[order], Vfull[:, order]
+    if return_info:
+        return w, Vfull, {"converged": info["converged"], "iters": info["iters"],
+                          "rate": rate}
+    return w, Vfull

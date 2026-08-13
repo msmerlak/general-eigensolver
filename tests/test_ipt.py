@@ -7,7 +7,7 @@ import sys
 import numpy as np
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from ssj import ipt_eigh, ipt_eig, ssj_ipt_eigh  # noqa: E402
+from ssj import ipt_eigh, ipt_eig, refine_eig, ssj_ipt_eigh  # noqa: E402
 from ssj.ipt import ipt_rate  # noqa: E402
 
 
@@ -153,6 +153,51 @@ def test_ipt_general_reports_divergence():
     A = rng.standard_normal((60, 60))  # Ginibre: far outside the basin
     _, _, info = ipt_eig(A, return_info=True)
     assert not info["converged"]
+
+
+def _match_err(a, b, scale):
+    b = list(b)
+    worst = 0.0
+    for x in a:
+        d = [abs(x - y) for y in b]
+        k = int(np.argmin(d))
+        worst = max(worst, d[k])
+        b.pop(k)
+    return worst / scale
+
+
+def test_refine_eig_lifts_float32_to_double():
+    """IPT as a refinement engine: a float32 LAPACK solve is ~1e-8 accurate;
+    a few IPT iterations must take it to full double precision. This works on
+    a DENSE GINIBRE matrix -- far outside IPT's own near-diagonal basin --
+    because the presolve supplies the frame."""
+    rng = np.random.default_rng(5)
+    n = 200
+    A = rng.standard_normal((n, n))
+    scale = np.linalg.norm(A, 2)
+    exact = np.linalg.eigvals(A)
+
+    w0, V0 = np.linalg.eig(A.astype(np.float32))
+    err0 = _match_err(w0.astype(complex), exact, scale)
+    assert err0 > 1e-10, "float32 presolve should NOT already be exact"
+
+    w, V, info = refine_eig(A, w0, V0, return_info=True)
+    assert info["converged"] and info["iters"] <= 6
+    assert info["rate"] < 1e-3          # the presolve lands deep in the basin
+    assert _match_err(w, exact, scale) < 1e-12
+    assert np.linalg.norm(A @ V - V * w, "fro") / scale < 1e-11
+    # improvement of at least four orders of magnitude
+    assert _match_err(w, exact, scale) < err0 / 1e4
+
+
+def test_refine_eig_reports_a_bad_presolve():
+    """A useless presolve must be reported, not silently returned as refined."""
+    rng = np.random.default_rng(6)
+    n = 60
+    A = rng.standard_normal((n, n))
+    junk = rng.standard_normal((n, n))            # not an eigenbasis at all
+    w, V, info = refine_eig(A, np.diag(junk), junk, return_info=True)
+    assert info["rate"] > 1.0 and not info["converged"]
 
 
 if __name__ == "__main__":
