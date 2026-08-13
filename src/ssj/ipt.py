@@ -42,7 +42,8 @@ import numpy as np
 
 from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 
-__all__ = ["ipt_eigh", "ipt_eig", "ipt_rate", "ssj_ipt_eigh", "refine_eig"]
+__all__ = ["ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate", "ssj_ipt_eigh",
+           "refine_eig"]
 
 
 def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
@@ -392,3 +393,78 @@ def refine_eig(A, w0, V0, tol=1e-13, max_iter=50, return_info=False):
         return w, Vfull, {"converged": info["converged"], "iters": info["iters"],
                           "rate": rate}
     return w, Vfull
+
+
+def ipt_eig_partial(A, cols, tol=1e-13, max_iter=200, return_info=False,
+                    hermitian=False):
+    """k targeted eigenpairs by IPT, at O(N^2 k) per iteration.
+
+    The IPT map is COLUMN-SEPARABLE: with Lambda_j = d_j + (WV)_jj and
+    V_ij = (WV)_ij/(Lambda_j - d_i), column j of the update depends only on
+    column j of V. Columns never interact, so the iteration restricts exactly
+    to any subset of them -- no approximation, no deflation, no locking. A
+    k-column run costs one N-by-N times N-by-k gemm per iteration instead of a
+    full N-by-N one.
+
+    `cols` selects WHICH eigenpairs: column j converges to the eigenpair whose
+    eigenvalue is near the diagonal entry A[cols[j], cols[j]]. That makes this
+    a solver for INTERIOR eigenvalues by target, the case Krylov methods find
+    hardest -- Lanczos/Arnoldi converge from the outside of the spectrum and
+    need shift-invert (an O(N^3) factorization per shift) to reach the middle.
+    Here an interior target costs no more than an extremal one.
+
+    Same basin as the full method (rho = max|W_ij|/|d_i - d_j| < ~1), and the
+    same honesty about it: non-convergence is reported, never hidden.
+
+    Returns (w, V) with w of length k and V of shape (n, k), columns unit-norm.
+    """
+    xp = _am(A)
+    A = xp.asarray(A)
+    n = A.shape[0]
+    if A.dtype.kind not in "cf":
+        A = A.astype(np.float64)
+    cols = np.asarray(cols, dtype=int)
+    k = len(cols)
+
+    d = xp.diag(A).copy()
+    W = A - xp.diag(d)
+    norm_A = float(xp.linalg.norm(A, ord="fro")) / max(np.sqrt(n), 1.0)
+    if norm_A == 0.0:
+        norm_A = 1.0
+
+    V = xp.zeros((n, k), dtype=A.dtype)
+    V[cols, xp.arange(k)] = 1.0
+    dsel = d[cols]
+    rows = xp.arange(k)
+    tol_abs = tol * norm_A
+    err0 = None
+    err = np.inf
+    converged = False
+    it = 0
+    R = xp.empty_like(V)
+
+    for it in range(1, max_iter + 1):
+        WV = W @ V                                   # the only O(N^2 k) work
+        diag_WV = WV[cols, rows]
+        Lam = dsel + (xp.real(diag_WV) if hermitian else diag_WV)
+        xp.subtract(Lam[None, :], d[:, None], out=R)
+        R[cols, rows] = 1.0                          # pinned entries
+        xp.reciprocal(R, out=R)
+        xp.multiply(WV, R, out=WV)
+        WV[cols, rows] = 1.0
+        xp.subtract(WV, V, out=V)
+        err = float(xp.max(xp.abs(V)))
+        V = WV
+        if err0 is None:
+            err0 = max(err, 1e-300)
+        if err <= tol_abs:
+            converged = True
+            break
+        if not np.isfinite(err) or err > 1e3 * err0:
+            break
+
+    V = V / xp.linalg.norm(V, axis=0, keepdims=True)
+    if return_info:
+        return Lam, V, {"iters": it, "converged": converged, "err": err,
+                        "gemms_equiv": it * k / max(n, 1)}
+    return Lam, V

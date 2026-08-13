@@ -467,3 +467,60 @@ iterations; what is missing is a presolve that is genuinely cheaper than a full
 solve. That exists on tensor-core hardware (float32/TF32 at 8–16× FP64), when
 tracking a slowly varying matrix, or whenever an application already holds a
 nearby eigenbasis — which is exactly when `refine_eig` should be reached for.
+
+
+---
+
+# Few eigenpairs: the strongest result here
+
+## IPT is column-separable
+
+In $\Lambda_j = d_j + (WV)_{jj}$, $V_{ij} = (WV)_{ij}/(\Lambda_j - d_i)$,
+column $j$ of the update depends **only on column $j$** of $V$. The columns
+never interact, so the iteration restricts to any subset of them *exactly* —
+no deflation, no locking, no accuracy loss. `ipt_eig_partial(A, cols)` runs
+$k$ columns at $O(N^2k)$ per iteration instead of $O(N^3)$.
+
+`cols` chooses *which* eigenpairs: column $j$ converges to the eigenvalue near
+the diagonal entry $A[c_j, c_j]$. So targets are specified directly, and an
+**interior** target costs exactly what an extremal one costs.
+
+That is the property Krylov methods lack. Lanczos/Arnoldi converge from the
+outside of the spectrum inward and need **shift-invert** to reach the middle —
+an $O(N^3)$ factorization per shift. IPT needs no factorization at all.
+
+## Against ARPACK with shift-invert, interior targets, $\rho = 0.05$
+
+| $N$ | $k$ | IPT partial | ARPACK shift-invert | `dgeev` (all) | **vs ARPACK** | resid |
+|---|---|---|---|---|---|---|
+| 500 | 4 | 0.0030 s | 0.0123 s | 0.212 s | **4.1×** | 1.2e-14 |
+| 500 | 16 | 0.0037 s | 0.0238 s | 0.175 s | **6.4×** | 9.0e-16 |
+| 1000 | 4 | 0.0067 s | 0.0514 s | 0.674 s | **7.7×** | 1.9e-14 |
+| 1000 | 16 | 0.0071 s | 0.0456 s | 0.614 s | **6.4×** | 9.5e-16 |
+| 2000 | 4 | 0.0274 s | 0.1837 s | 2.159 s | **6.7×** | 5.7e-15 |
+| 2000 | 16 | 0.0324 s | 0.2373 s | 2.128 s | **7.3×** | 5.7e-15 |
+
+Six or seven iterations throughout. Symmetric interior targets against
+`eigsh` shift-invert, $N=1000$: **6.7×** at $k=4$ and **5.3×** at $k=16$,
+and 13.7–18.7× against a full `dsyevd`.
+
+## Cost really does scale with $k$, not $N$
+
+$N=1000$ general, as a fraction of a full `dgeev`:
+
+| $k$ | 1 | 4 | 16 | 64 | 256 | 500 |
+|---|---|---|---|---|---|---|
+| cost vs full `dgeev` | 0.7% | 1.3% | 1.3% | 2.7% | 6.7% | 14.1% |
+
+Even at $k = N/2$ it is still 7× cheaper than the full solve, so there is no
+practical crossover at which one should switch back — take the whole spectrum
+this way if the basin permits.
+
+## The same caveat, unchanged
+
+This lives inside IPT's basin ($\rho \lesssim 1$, `ipt_rate`), and reports
+non-convergence rather than hiding it. The regime is dense near-diagonal
+matrices with targeted interior eigenpairs — exactly the setting where the
+alternatives are worst: a full dense solve wastes $N/k$ of its work, and
+shift-invert Krylov pays a cubic factorization to look at the middle of the
+spectrum.

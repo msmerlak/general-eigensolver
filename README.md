@@ -37,6 +37,12 @@ Where LAPACK is beaten, at full accuracy:
 | **general** | near-diagonal ($\rho \lesssim 0.1$) | **4–12×** faster than `dgeev` | [GENERAL.md](GENERAL.md) |
 | **normal** (nonsymmetric, complex spectrum) | any | **1.3–1.9×** faster than `dgeev`, and *unitary* eigenvectors | [GENERAL.md](GENERAL.md) |
 
+For **few eigenpairs**, `ipt_eig_partial(A, cols)` exploits IPT's
+column-separability to compute k targeted eigenpairs at O(N²k) — **4–7.7×
+faster than ARPACK with shift-invert** on interior targets, with no
+factorization at all, and up to 143× cheaper than a full solve. See
+[GENERAL.md](GENERAL.md).
+
 For the hard remainder — dense, non-normal, far from diagonal — `sdc_eigvals`
 (spectral divide and conquer via the matrix sign function) solves it to 1e-13
 with no basin condition, though at 0.13–0.22× of `dgeev` on this CPU. GENERAL.md
@@ -52,7 +58,8 @@ nonsymmetric matrices, and why.
 
 ```python
 import numpy as np
-from ssj import ssj_eigh, ipt_eigh, ipt_eig, ssj_ipt_eigh, normal_eig
+from ssj import (ssj_eigh, ipt_eigh, ipt_eig, ipt_eig_partial,
+                 ssj_ipt_eigh, normal_eig, refine_eig)
 
 # near-diagonal symmetric input: a handful of gemms, beating dsyevd
 w, V = ipt_eigh(A_near_diagonal)
@@ -62,6 +69,9 @@ w, V = ipt_eig(A_general)          # eigenvectors are NOT orthogonal
 
 # normal but nonsymmetric (A A^T = A^T A): exact, via ONE Hermitian solve
 w, U = normal_eig(A_normal)        # U unitary, w complex
+
+# k targeted eigenpairs (interior is as cheap as extremal), O(N^2 k)
+w, V = ipt_eig_partial(A, cols=[500, 501, 502])
 
 # is IPT applicable? O(N^2), free next to a gemm
 from ssj.ipt import ipt_rate
