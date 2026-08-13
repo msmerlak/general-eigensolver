@@ -965,3 +965,119 @@ than the basin discussion suggests. It is not "wherever a factorization is
 expensive"; it is **wherever IPT converges in a handful of iterations**, which
 is the near-diagonal regime the per-column screen already identifies, and the
 existing router already handles correctly.
+
+
+---
+
+# A broader campaign: what else was tried
+
+Systematic sweep beyond the zoo above, each measured against a real
+benchmark and kept only if it won. `python3 tests/test_window.py` reproduces
+the shipped result; the rest are recorded here because they are negative but
+non-obvious.
+
+## Windowed purification: the strongest new capability in this repository
+
+Every partial solver here — `ipt_eig_partial`, `davidson_eig`, `block_ipt_eig`
+— needs a diagonal entry that already approximates the wanted eigenvalue: they
+are targeted solvers for near-diagonal or structured input. Purification
+(`ssj.purify`) needs none of that: it computes a spectral projector for ANY
+Hermitian matrix, globally, with no basin condition. Two projectors compose
+into a **window projector**,
+
+$$P_{\mathrm{window}} = P(\mathrm{hi}) - P(\mathrm{lo})$$
+
+idempotent because both factors are polynomials in $A$ and hence commute
+exactly, with rank equal to the exact number of eigenvalues in $[\mathrm{lo},
+\mathrm{hi}]$. Extract an orthonormal basis for its range (pivoted QR),
+Rayleigh–Ritz on that small basis: exact eigenpairs in the window.
+
+**The reason this earns a place is not speed.** Measured, GOE $N=400/800$: the
+count is exact and residuals sit at machine precision ($3.9\times10^{-16}$ to
+$1.3\times10^{-15}$), but wall time is **6–7× slower than ARPACK even when
+ARPACK is handed the exact count in advance**, and at $N=800$ slower than a
+full `dsyevd`. The reason to use it is that the exact count is *needed*, not
+guessed. ARPACK shift-invert requires $k$ up front and returns exactly $k$
+Ritz values with no warning if the true count is larger. Measured, GOE
+$N=600$, a window holding 24 true eigenvalues:
+
+| $k$ guessed | ARPACK returns | actually in-window | |
+|---|---|---|---|
+| 12 (half) | 12 | 12 | **missed 12, silently** |
+| 22 (close) | 22 | 22 | **missed 2, silently** |
+| 24 (exact) | 24 | 24 | correct |
+| `window_eig` | — no guess needed — | **24** | exact, every time |
+
+Edge cases hold: empty windows (above/below the spectrum) return count 0; a
+window covering the whole spectrum returns $N$; three exactly degenerate
+eigenvalues inside a window are returned as 3, residual $1.9\times10^{-14}$.
+A boundary landing exactly on an eigenvalue is ambiguous by construction, true
+of any spectral-projector method and not a defect here.
+
+Use this whenever completeness on an *unknown* count matters more than wall
+time: counting states in a spectral window, verifying nothing was missed, or
+whenever the honest alternative is guessing $k$ and hoping.
+
+## Jacobi-Davidson: no improvement over plain Davidson, two variants tried
+
+Plain `davidson_eig` already won 16× basin and higher speed over IPT
+(previous section). Jacobi–Davidson is the standard next step: solve the
+*projected* correction equation $P(A-\theta I)P\,t = -Pr$, $P = I - uu^{\mathsf
+T}$, rather than preconditioning the raw residual.
+
+**Diagonal-preconditioned JD** (solve the projected system with $K =
+\mathrm{diag}(A)-\theta I$ via the standard rank-one-correction formula, same
+$O(N)$ cost per iteration as plain Davidson) changed **nothing**: 14 vs 14,
+29 vs 30, 96 vs 103 iterations across the same coupling sweep — noise, not
+signal.
+
+**Inner-PCG JD** (a few steps of preconditioned CG on the actual projected
+operator, i.e. genuinely solving the correction equation rather than applying
+the preconditioner once) reduces *outer* iterations but not total cost:
+coupling 2 dropped from 29 outer iterations to 13, but at ~9 matvecs each
+($P(A-\theta I)P$ applied via two matrix–vector products per CG step) —
+**~120 total matvecs against plain Davidson's 29.** At coupling 8 it's worse
+in both counts (891 matvecs vs 96). Plain Davidson is Pareto-better than
+either JD variant on this problem class; the correction-equation machinery
+buys nothing that the diagonal preconditioner didn't already capture.
+
+## Davidson's basin is anchored to the diagonal — Krylov methods are not
+
+Testing Davidson against `scipy.sparse.linalg.lobpcg` and `eigsh` on
+**extremal** eigenvalues (LOBPCG's actual design target) rather than interior
+ones exposed a boundary worth stating plainly. $N=400$, target = smallest
+eigenvalue:
+
+| coupling | Davidson | LOBPCG | ARPACK (SA) |
+|---|---|---|---|
+| 0.5 | 12 its, 0.029 s | 0.090 s | 0.027 s |
+| 2 | 25 its, 0.032 s | 0.111 s | 0.022 s |
+| 8 | 72 its, 0.077 s | 0.105 s (only 2.6e-10) | 0.015 s |
+| 30 | **diverges** | 0.102 s, 1.6e-15 | **0.013 s, 1.8e-15** |
+
+At coupling 30 Davidson **diverges even on an extremal target**, while ARPACK
+converges every time, faster than everything else in the table. The reason:
+Lanczos/Arnoldi Krylov iteration is naturally globally convergent toward
+extremal eigenvalues — it needs no starting guess anchored to a diagonal
+entry — while Davidson's initial vector $e_j$ is only a good starting point
+when the diagonal entry $d_j$ is close to the true eigenvalue, which strong
+coupling destroys regardless of whether the target is extremal or interior.
+
+**This sharpens the whole family's niche.** IPT/Davidson/block-IPT own
+*interior eigenvalues of near-diagonal-ish matrices*; ARPACK owns *extremal
+eigenvalues of anything*; window purification owns *reliable counts of
+anything, at a real cost in speed*. None of them is a general replacement for
+the others, and this campaign is what located the boundaries precisely rather
+than leaving them assumed.
+
+## Full-spectrum purification-based SDC: confirmed non-competitive
+
+Composing `purify_split` recursively into a full Hermitian eigensolver
+(the natural next step after the earlier single-split benchmark) was
+measured end to end rather than assumed: $N=400/800$, `min_block`
+$32$–$128$, **0.04–0.33× of `dsyevd`**, accurate to $8$–$14\times10^{-15}$.
+This confirms rather than contradicts the earlier single-split finding
+(purification wins on gemm-equivalents against Newton's sign function, but
+`dsyevd` at 15–18 gemm-equivalents undercuts both) — not shipped as a new
+module since it duplicates a result already established, but worth recording
+that the full assembly was actually built and measured, not inferred.

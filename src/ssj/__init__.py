@@ -10,6 +10,7 @@ from .purify import purify, spectral_projector, purify_split
 from .gipt import gipt_eig
 from .anderson import anderson_ipt_eig
 from .davidson import davidson_eig
+from .window import window_eig, window_count
 
 __all__ = ["ssj_eigh", "off_frobenius", "ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate_columns",
            "ssj_ipt_eigh", "refine_eig",
@@ -17,5 +18,5 @@ __all__ = ["ssj_eigh", "off_frobenius", "ipt_eigh", "ipt_eig", "ipt_eig_partial"
            "sdc_eigvals", "matrix_sign", "eig_partial", "block_ipt_eig", "adaptive_block_ipt_eig",
            "choose_block", "purify", "spectral_projector",
            "purify_split", "gipt_eig", "anderson_ipt_eig",
-           "davidson_eig"]
+           "davidson_eig", "window_eig", "window_count"]
 __version__ = "0.1.0"
