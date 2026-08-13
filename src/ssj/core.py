@@ -178,6 +178,7 @@ def ssj_eigh(
     gemm_cap: float = 1.0,
     gemm_ns_factor: float = 0.05,
     return_info: bool = False,
+    X0: np.ndarray | None = None,
 ):
     """Eigendecomposition of a real symmetric or complex Hermitian matrix by
     Simultaneous Saturated Jacobi sweeps.
@@ -200,6 +201,10 @@ def ssj_eigh(
     return_info : if True, also return a dict with keys "sweeps", "history"
         (off(B)/||A||_2 before each retraction and at exit), "converged",
         "gemms" (N^3-gemm count, "gemm" method only), "norm_A".
+    X0 : optional (n, n) orthonormal warm start (e.g. the eigenbasis of a
+        nearby matrix). It is orthonormalized on entry, so a slightly drifted
+        basis is fine. A warm start within off(B)/||A||_2 ~ 1e-2 of
+        diagonalizing lands directly in the quadratic tail (~3-5 sweeps).
 
     Returns
     -------
@@ -221,7 +226,13 @@ def ssj_eigh(
         return (w, V, {"sweeps": 0, "history": [0.0], "converged": True,
                        "gemms": 0, "norm_A": 0.0}) if return_info else (w, V)
 
-    X = np.eye(n, dtype=A.dtype)
+    if X0 is None:
+        X = np.eye(n, dtype=A.dtype)
+    else:
+        X0 = np.asarray(X0)
+        if X0.shape != (n, n):
+            raise ValueError("X0 must match the shape of A")
+        X = _orth_qr(X0.astype(A.dtype, copy=False))
     eye = np.eye(n, dtype=A.dtype)
     history: list[float] = []
     gemms = 0

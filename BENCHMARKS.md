@@ -164,6 +164,28 @@ The gemm variant runs 206 raw gemms over 20 sweeps on the battery's GOE row
 (reference: 248 over 21) — sweep parity with QR at $\sim$2× the flops, every
 flop a gemm.
 
+## Warm starts (eigenpair tracking)
+
+`ssj_eigh(A2, X0=V)` accepts an orthonormal warm start — e.g. the eigenbasis
+of a nearby matrix, orthonormalized on entry. GOE $N=1000$, perturbed by a
+unit-spectral-norm symmetric matrix scaled by $\epsilon$, warm-started from
+the unperturbed eigenbasis (tol $10^{-13}$):
+
+| $\epsilon$ | sweeps | wall | `gemm`-mode raw gemms | LAPACK `eigh` cold |
+|---|---|---|---|---|
+| 1e-2 | 5 | 0.74 s | — | 0.07 s |
+| 1e-4 | 3 | 0.39 s | 20 | 0.07 s |
+| 1e-8 | 1 | 0.22 s | — | 0.08 s |
+
+A warm start lands directly in the quadratic tail, so tracking costs
+~10–25 raw gemms per update. On this CPU that still loses to simply
+re-running `dsyevd` (see below — here a full eigensolve costs only a handful
+of gemm-equivalents). The warm-start case is where the method's actual
+competitive claim lives: on hardware where an eigensolve costs 50–200
+gemm-equivalents, ~20 gemms per tracking update is a 3–10× win, and even the
+cold-start gemm variant (~330 gemms at $N=1000$) reaches the boundary of that
+range. Unmeasured here — this container has no such accelerator.
+
 ## Honest wall-clock context
 
 LAPACK `eigh` (dsyevd) solves the GOE $N=1000$ problem in 0.07 s on this box

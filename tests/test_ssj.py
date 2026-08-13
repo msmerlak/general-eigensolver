@@ -105,6 +105,21 @@ def test_gemm_orthogonality_is_real():
     assert np.linalg.norm(V.T @ V - np.eye(150), "fro") < 1e-11
 
 
+def test_warm_start():
+    rng = np.random.default_rng(7)
+    M = rng.standard_normal((120, 120))
+    A = (M + M.T) / np.sqrt(240.0)
+    _, V0 = np.linalg.eigh(A)
+    P = rng.standard_normal((120, 120))
+    P = (P + P.T) / 2.0
+    A2 = A + 1e-4 * P / np.linalg.norm(P, 2)
+    w, V, info = ssj_eigh(A2, X0=V0, return_info=True)
+    assert info["converged"] and info["sweeps"] <= 5
+    wt = np.linalg.eigvalsh(A2)
+    assert np.max(np.abs(w - wt)) < 1e-12
+    assert np.linalg.norm(V.T @ V - np.eye(120), "fro") < 1e-11
+
+
 if __name__ == "__main__":
     fns = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     for fn in fns:
