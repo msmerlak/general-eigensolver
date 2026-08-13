@@ -615,3 +615,78 @@ magnitude cheaper than either solver, so it disappears into the noise.
 That is what "broadly usable" can honestly mean here: never materially worse
 than the standard tool, up to two orders of magnitude better when targets are
 genuinely isolated, and never wrong when the indicator misjudges.
+
+
+---
+
+# A better fixed-point equation: block IPT
+
+IPT's fixed point is quadratic, and its contraction rate is set by the
+*smallest* denominator $|\lambda_j - d_i|$ — a locator expansion, which fails
+exactly when another diagonal entry sits near the target eigenvalue. Saturating
+that denominator does not help (Failure 1 above): the trouble is the sum over
+many near-resonant terms, not any single one.
+
+## The equation
+
+Stop treating near-resonant states perturbatively. Split the indices into a
+block $B$ (the target plus its worst offenders) and the rest $C$, and write
+$v_C = X v_B$. Then $Av = \lambda v$ is *exactly* equivalent to
+
+$$X = (\lambda - D_C)^{-1}\left(W_{CB} + W_{CC}X\right), \qquad
+\left(A_{BB} + W_{BC}X\right)v_B = \lambda\, v_B$$
+
+The first is IPT-like but runs **only over $C$**, whose gaps all exceed the
+block radius by construction; the second is a small $b \times b$ eigenproblem
+solved *exactly*, and it is what absorbs the near-degeneracies. Plain IPT is
+the $b = 1$ limit. (This is quasi-degenerate / Löwdin–Bloch effective-Hamiltonian
+perturbation theory read as a fixed-point iteration — standard physics
+practice, not a new idea.)
+
+**The basin becomes a parameter of the algorithm rather than a property of the
+matrix.**
+
+## Measured: the basin is ~16× wider
+
+Dense near-diagonal, $N=400$, increasing coupling until each method fails:
+
+| coupling | plain IPT | block $b{=}8$ | block $b{=}32$ |
+|---|---|---|---|
+| 0.5 | 13 its | 5 its | 4 its |
+| 2 | **diverges** | 11 its | 7 its |
+| 8 | **diverges** | diverges | 26 its |
+| 20 | diverges | diverges | diverges |
+
+Plain IPT dies at coupling 0.5; block IPT with $b=32$ survives to 8 — a **16×
+wider basin**, and it is tunable, which plain IPT's is not.
+
+## But it is slower where both work — the trade is linear
+
+Each iteration costs $O(N^2 b)$ rather than $O(N^2)$, so a wider basin is paid
+for in proportion to the block size. $N=600$:
+
+| | plain IPT | block $b{=}8$ | |
+|---|---|---|---|
+| coupling 0.2 | 5.0 ms (9 its) | 18.8 ms (4 its) | **0.27×** |
+| coupling 0.5 | 2.9 ms (13 its) | 17.4 ms (5 its) | **0.17×** |
+
+Fewer iterations, more work per iteration, net loss. Where plain IPT
+*diverges*, though, the comparison is against LAPACK rather than against IPT,
+and block IPT still wins: coupling 2 at $b{=}8$ takes 37.5 ms against
+`dgeev`'s 264 ms (**7.0×**), coupling 8 at $b{=}32$ takes 212 ms against
+308 ms (**1.5×**).
+
+## Verdict on the question
+
+Better basin: **yes, 16× and tunable.** Better performance: **no** — 4–6×
+slower wherever plain IPT already converges. Block IPT is the right tool
+strictly in the band between the two basins, where it converts a divergence
+into a 1.5–7× win over LAPACK.
+
+One negative worth recording: choosing the block by the *ratio*
+$|W_{ij}|/|d_i-d_j|$ — the terms that provably break the contraction, and so
+the "principled" criterion — is **not** uniformly better than choosing by gap
+alone. On a 2D Anderson lattice the gap criterion converges at disorder 40
+where the ratio criterion does not, and the ordering reverses at disorder 80.
+No block criterion tested reaches the strongly resonant lattice regime
+($W \lesssim 20$), where multi-hop resonances defeat all of them.
