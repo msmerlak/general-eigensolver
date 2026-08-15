@@ -1720,6 +1720,94 @@ which is the same conclusion `_auto_gate` reached from the cost side, now
 reached from the accuracy side. A better classifier does not help when
 speculative execution dominates it.
 
+---
+
+# A factorization as the state: inertia-certified slicing
+
+Carry the $LDL^\top$ factorization of $A - \sigma I$ as a **second-order Taylor
+jet in the shift**, every scalar held as $x_0 + x_1\varepsilon + x_2\varepsilon^2$.
+One banded pass then returns three things exactly:
+
+$$\nu(\sigma) = \#\{d_{0j} < 0\} = \#\{\lambda_i < \sigma\}, \qquad
+s_1 = \textstyle\sum_j \frac{d_{1j}}{d_{0j}} = \operatorname{tr} R, \qquad
+s_2 = \textstyle\sum_j\!\left(\frac{d_{1j}^2}{d_{0j}^2} - \frac{2d_{2j}}{d_{0j}}\right) = \operatorname{tr} R^2$$
+
+with $R = (\sigma I - A)^{-1}$ — an integer index by Sylvester's law *and* the
+first two resolvent trace moments, from a single factorization. Laguerre's
+method on $\log|\det(A-\sigma I)|$ then converges cubically, with previously
+found roots Maehly-deflated out of the *moments* rather than out of the matrix.
+
+Structurally new here on three counts: the state is a **factorization**
+(#24/#25 form factorizations, but as one step of a flow whose state is the
+matrix — here $A$ never changes); the state carries a **discrete certificate**,
+the only integer in any fixed point in this document; and there is **no gap
+denominator anywhere**, so it is not a re-parameterization of the locator and
+$\rho(J)$ is not even defined for it.
+
+## As an eigensolver it loses by three orders of magnitude
+
+Against ARPACK shift-invert on $k\approx16$ interior eigenpairs, $n=576$:
+**25–147× in flops and 317–1149× in wall time.** The flop deficit is
+hardware-free, so compiling it away does not save it.
+
+The mechanism is one sentence: **shift-invert amortizes one factorization
+across all $k$ eigenpairs** (2–6 triangular solves each, measured), while this
+map builds a **new** factorization at every shift — 11.4 per eigenvalue, each
+~6× a plain $LDL^\top$ for the jet arithmetic. That is ~1400
+factorization-equivalents against 1. The moments genuinely work (Laguerre plus
+moment-deflation cut 1298 passes to 182, a real **7.1×** over pure Sylvester
+bisection), but 7× against a $10^3$ deficit is noise.
+
+It is correct where the locator is not — 2e-16 accuracy and **exact
+multiplicities** on a 3-fold degenerate spectrum where `ipt_eig_partial`
+returns garbage ($\rho=59.8$, error 53) or nothing ($\rho=\infty$) — but ARPACK
+already does that, faster, on every one of those cases. There is no eigenpair
+regime where this is the right answer, because it needs factorizations too, so
+it can never exploit the one situation (an unaffordable factorization) that
+would disqualify its competitor.
+
+## The narrow win, verified independently, and its failure mode
+
+The *count* sub-capability does win. Re-measured here from scratch,
+sequentially, against `window_count` (#20, purification), with window bounds
+placed in gaps:
+
+| $N$ | inertia | `window_count` | speedup | counts (inertia/purify/true) |
+|---|---|---|---|---|
+| 144 | 18 ms | 7 ms | 0.4× | 72/72/72 |
+| 576 | 93 ms | 187 ms | 2.0× | 288/288/288 |
+| 1024 | 192 ms | 1216 ms | 6.3× | 512/512/512 |
+| 1600 | 350 ms | 3936 ms | **11.2×** | 800/800/800 |
+
+Two passes, no iteration, $O(Nb^2)$ against purification's $O(N^3)$; crossover
+$N\approx250$ and widening. On 2D Anderson the same sweep gives 0.7× → **14.0×**.
+
+**Posing the question badly breaks both methods.** My first attempt used
+spectrum quantiles as the window bounds — but quantiles of an eigenvalue list
+*are* eigenvalues, so "how many lie in $[lo,hi]$" is ambiguous to within
+rounding, and both methods disagreed with the truth at 3 of 5 sizes (72 vs 74
+vs 71, 799 vs 798 vs 801). With bounds in gaps, both are exact everywhere.
+That is a property of the question, not of either algorithm.
+
+**And the certificate is only certified away from the spectrum.** Audited over
+200 shifts per family:
+
+| family | generic shifts | within 1e-13…1e-9 of an eigenvalue |
+|---|---|---|
+| 2D Anderson | 0/200 wrong | 0/200 wrong |
+| 2D Laplacian | 0/200 wrong | **23/200 wrong, max $|\Delta\nu| = 248$** |
+
+248 out of 576 — nearly half the count. The cause is pivot growth in the
+unpivoted banded elimination when a shift sits inside an exact high-multiplicity
+cluster, and it is *worse* than the exploring agent reported (it recorded
+$\max|\Delta\nu| = 6$). So this is usable for a window count with user-chosen
+bounds, and not usable as the inner certificate of a root-finder whose shifts
+converge onto eigenvalues by construction — which is exactly what it was built
+to be.
+
+Recorded as `experiments_inertia.py`, not shipped: it is banded-only where
+`window_eig` takes any dense Hermitian, so it is a strictly narrower tool.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
