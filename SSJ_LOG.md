@@ -6,42 +6,40 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #10)*
+*(rewritten each tick; as of attempt #11)*
 
-**Fast eigensolvers divide by gaps** — a Newton step in disguise; the price is
-a basin (ρ < 1) or a saturation. **The solve is two phases**: a self-
-accelerating globalization (couplings feed the diagonal, spread widens gaps,
-gaps shrink angles — no plateau, cost concentrated where spread is smallest),
-then a cliff into the basin where the endgame needs no manifold (IPT, #8).
-Spread can be injected up front — the block-size schedule, 15 → 8 sweeps (#9).
+**Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
+saturation. **The solve is two phases** — a self-accelerating globalization
+(cost concentrates where diagonal spread is smallest; injectable via the
+block schedule, #9) and a post-cliff endgame that needs no manifold (IPT,
+#8). **The merge is irreducibly global** (#10): angles localize in sorted
+order but couplings do not, and work scales with coupling mass — rotation
+mass ≠ annihilation work. The dense map and its QR are the price of global
+annihilation; nothing local, cheaper, or differently-saturated survives
+measurement (#7, #10).
 
-**The merge is irreducibly global (#10).** After the halves are diagonalized,
-the ANGLES are local in sorted order (91% of K-mass within d ≤ 64 — gaps grow
-with distance) but the COUPLINGS are not (15% of B-mass within d ≤ 32), and
-coupling mass is what must die. Annihilating a pair removes its whole coupling
-regardless of how small the angle is, so the O(n²) tiny far-pair rotations do
-most of the B-mass removal. Two independent refutations: block-passes-only
-stalls at rel_off 4–6 on every spectrum, and banding K stalls even at b
-covering 97% of K-mass. **Rotation mass ≠ annihilation work.** No banded/local
-merge can work; the dense map and its dense retraction are the price of
-global annihilation.
+**Composition is Amdahl, not multiplication (#11).** Schedule (1.9×), hybrid
+(~1.1×), mixed precision (~1.1×) — historically 1.44× and 1.35× alone —
+compose to 2.33×, not 3.7×, because they all shorten the *same* expensive
+phase. Once the schedule collapses the globalization, mixed precision has
+little left to accelerate on CPU (and fp32 batched `eigh` is only ~1.3× its
+fp64 cost, unlike sgemm's 2×). A further phase-targeted acceleration must
+find cost the others left standing.
 
-**Load-bearing, as measured:** both saturations (#7); the map's global reach
-(#10); exact orthogonality at the hand-off (#8); manifold only pre-cliff (#8).
-**Conventions overturned:** fixed block size (#9); always-tight NS floor (#5);
-"NS is cheaper than QR" (#7, invalid measurement).
+**Precision does have a load-bearing boundary (#11):** structure below
+fp32's ~1e-7 resolution — tight clusters, exact ties — is *invisible* to the
+low phase and lands on the fp64 phase unresolved. The mixed schedule
+therefore hands its small tail blocks to the fp64 phase (2 vs 5 sweeps on a
+1e-9 cluster, 18 vs 32 on 5-fold ties), while the big head blocks belong to
+fp32 only. Phases own schedule *segments*.
 
-**Where the remaining headroom is, honestly:** sweep count is near its floor
-(merge contraction runs 0.5 → 0.01, close to quadratic; 8 sweeps at n=800),
-and per-sweep cost is floored by B-form + angles + a QR that nothing local or
-cheaper replaces. What is NOT yet exploited: (1) **precision** — the
-globalization phase is noise-tolerant because the map is memoryless, so the
-schedule's expensive early phase should run in fp32 and only the tail in
-fp64: mixed × schedule × hybrid has never been measured together; (2)
-**hardware** — every piece shipped (gemm sweeps, batched-eigh blocks, IPT) is
-GPU-shaped, and the Colab notebook predates the schedule and the hybrid.
-Deepest open question: does the full composition close the gap to LAPACK on
-CPU, and does it invert the ratio on a GPU?
+**Where this stands, honestly:** cold dense CPU solve now 16–18× LAPACK
+(from 28–42×), floor mostly irreducible on this axis. The undecided
+questions live elsewhere: (1) **GPU** — every shipped piece (gemm sweeps,
+batched-eigh blocks, pure-gemm IPT) is GPU-shaped, and the Colab notebook
+predates the schedule, the hybrid, and the mixed policy — updating it and
+running it is the highest-value open experiment; (2) **tracking** — SSJ's
+warm start already beats re-solving; the composed solver should inherit it.
 
 ## What SSJ is, and where the cost sits
 
@@ -203,6 +201,7 @@ the tail-exclusion path fires.
 | 8 | **Compose the globalizer with the manifold-free endgame** (`ssj_ipt_eigh` + BC), and instrument where the basin opens | **shipped, with a real bug found by the output assert.** The basin opens as a *cliff*; hybrid+BC = 12 sweeps + 6 gemms at n=800. |
 | 9 | **Anatomy of the pre-cliff phase, then a block-size SCHEDULE** (big blocks early, small late) | **the campaign's best result.** GOE n=800: 15 → 8 sweeps; wall 1.90× over plain, 2.13× with the hybrid — 13.5–15.9× LAPACK, from 28–34×. |
 | 10 | **Is the merge local?** K/B mass vs sorted distance; block-passes-only solver; banded-K map | **decisively no — with the campaign's sharpest mechanism finding.** Angles are local, couplings are not; rotation mass ≠ annihilation work. |
+| 11 | **The full composition: mixed × schedule × hybrid**, plus the fp64-phase block policy it needed | **champion config, 2.33× over plain (16–18× LAPACK) — and gains compose by Amdahl, not multiplication.** |
 
 ### 1. SSJ-BC — verified
 
@@ -846,3 +845,54 @@ floor, per-sweep cost floored — the unexploited axes are precision (the
 memoryless map makes the expensive globalization phase noise-tolerant) and
 hardware (everything shipped is GPU-shaped). Next tick: the full
 mixed × schedule × hybrid composition, never measured together.
+
+### 11. Mixed × schedule × hybrid — the composition, and why gains don't multiply
+
+Queued by #10. Verify-before-believing found the predicted defect first: the
+mixed branch forwarded the whole schedule to the fp64 phase, whose sweep
+counter restarts — so it re-fired the n/2 and n/4 blocks as *fp64* batched
+eigensolves on an already-warm iterate. Measured: identical sweep counts with
+or without them — pure waste (~12 modelled gemm-equivalents at n=800).
+
+**The policy that shipped: phases own schedule segments.** The fp32 phase
+gets the full schedule (the spread problem is its job); the fp64 phase gets
+only the schedule's small tail entry. The tail is not optional — structure
+below fp32's ~1e-7 resolution is invisible to the low phase and arrives at
+the fp64 phase unresolved, where small blocks are exactly what resolves it:
+
+| case | fp64 phase w/ tail blocks | w/o |
+|---|---|---|
+| clustered 1e-9 n=400 | **2 sweeps** | 5 |
+| 5-fold deg n=200 | **18** | 32 |
+
+**Wall.** n=1200 CLEAN (1.0% contamination); n=800 at 11.8% (suggestive);
+n=400 at 40.6% (discarded):
+
+| n=1200 | ms | ×LAPACK | vs plain |
+|---|---|---|---|
+| plain ssj | 7068 | 41.6× | 1.00× |
+| sched fp64 (#9) | 3398 | 20.0× | 2.08× |
+| sched mixed | 3571 | 21.0× | 1.98× |
+| hybrid sched fp64 | 3297 | 19.4× | 2.14× |
+| **hybrid sched mixed** | **3038** | **17.9×** | **2.33×** |
+
+(n=800 suggestive: 2.35×, 16.3× LAPACK.) Load-immune: 7 fp32 + 2 fp64 sweeps
+replace 9 fp64 at n=800; accuracy ≤ 8.2e-15 everywhere, asserted.
+
+**The finding worth keeping: composition is Amdahl, not multiplication.**
+Schedule 1.90×, hybrid 1.44× alone (#8-era), mixed 1.35× alone (historical) —
+"expected" product 3.7×; measured 2.33×. All three shorten the *same*
+expensive globalization phase, so each one shrinks what the next can save.
+Note also `sched mixed` *alone* loses to `sched fp64` at n=1200: fp32 batched
+`eigh` is only ~1.3× faster than fp64 (unlike sgemm's 2×), and once big-block
+eighs are a large share of the remaining cost, mixed's margin dies — it only
+pays (~8%) inside the hybrid, which replaces the fp64 tail with IPT and
+leaves proportionally more of the solve in sgemm-land.
+
+**Aggregate standing:** cold GOE CPU solve 16–18× LAPACK, from 28–42× at
+campaign start. This axis is near its floor; the reflection now points the
+next ticks at the GPU notebook (predates schedule/hybrid/mixed-policy) and
+the tracking niche.
+
+160 tests pass (1 new, pinning the fp64-phase tail-block policy on the
+fp32-invisible cluster).

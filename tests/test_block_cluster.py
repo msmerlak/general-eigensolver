@@ -281,3 +281,16 @@ def test_block_schedule_entries_capped():
     w, V, info = ssj_eigh(A, block_m=[500, 32], return_info=True)
     assert info["converged"]
     assert_accurate(A, w, V)
+
+
+def test_mixed_schedule_full_phase_resolves_fp32_invisible_cluster():
+    """precision="mixed" with a block schedule: the fp64 phase must keep the
+    schedule's small tail blocks. A 1e-9 cluster is invisible at fp32
+    resolution (~1e-7), so it reaches the fp64 phase unresolved -- with the
+    tail blocks it costs 2 sweeps there, without them 5."""
+    A = clustered(400, gap=1e-9)
+    w, V, info = ssj_eigh(A, precision="mixed", block_m=[200, 100, 32],
+                          return_info=True)
+    assert info["converged"]
+    assert info["sweeps"] <= 3          # fp64 phase alone
+    assert_accurate(A, w, V, tol=1e-11)

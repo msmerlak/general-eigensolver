@@ -445,11 +445,20 @@ def ssj_eigh(
             block_until=block_until,
         )
         full_dt = np.complex128 if A.dtype.kind == "c" else np.float64
+        # The full-precision phase warm-starts past the spread problem, so the
+        # schedule's big head blocks would be fp64 eigensolves fired on a
+        # near-converged iterate -- measured pure waste (same sweep count).
+        # But the SMALL tail blocks stay: structure below fp32's ~1e-7
+        # resolution (tight clusters, exact ties) is invisible to the low
+        # phase and lands on the fp64 phase unresolved, where small blocks
+        # are exactly what resolves it (clustered 1e-9: 2 sweeps with the
+        # tail blocks vs 5 without; 5-fold degeneracy: 18 vs 32).
+        block_full = block_m if np.ndim(block_m) == 0 else block_m[-1]
         w, V, info = ssj_eigh(
             A.astype(full_dt), tol=tol, method=method,
             max_sweeps=max_sweeps, ns_switch=ns_switch, gemm_cap=gemm_cap,
             gemm_ns_factor=gemm_ns_factor, return_info=True,
-            X0=V_low.astype(full_dt), block_m=block_m,
+            X0=V_low.astype(full_dt), block_m=block_full,
             block_passes=block_passes, block_until=block_until,
         )
         if return_info:
