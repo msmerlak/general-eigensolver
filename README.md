@@ -221,6 +221,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `experiments_accel.py` — accelerating the double-bracket flow: momentum works (26x), preconditioning does not
 - `experiments_homotopy.py` — path following: globalizes IPT, costs 26-248x SSJ, and cannot handle exact degeneracy
 - `experiments_schur.py` — a triangular fixed point: works, but loses the descent property that makes SSJ reliable
+- `experiments_secular.py` — a scalar map: eigenvalues as roots of a rational function, exact at any coupling, O(n^2)
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
 - `RESULTS.md` — original measured results (Julia reference implementation)

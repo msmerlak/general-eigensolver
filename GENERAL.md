@@ -1558,6 +1558,92 @@ generator, the arctan saturation on it, and the symmetric pairing that gives
 it a descent property are one mechanism, and each piece has now been removed
 separately and independently found to be load-bearing.
 
+---
+
+# A scalar map: eigenvalues as roots of a rational function
+
+Every map above iterates on a vector, a subspace, a projector or a matrix.
+This one iterates on a **scalar**, one per eigenvalue, and it is not a
+fixed-point iteration at all — it is root-finding on
+
+$$f(\lambda) = 1 + \sigma \sum_i \frac{z_i^2}{d_i - \lambda}$$
+
+whose poles are exactly the diagonal entries of $D$ and whose roots are
+exactly the eigenvalues of $A = D + \sigma zz^\top$.
+
+The connection to the rest of this document is what makes it worth having.
+IPT expands $(D+W)$'s eigenvalues in a perturbation series and needs
+$\rho < 1$ for that series to converge. When $W$ has rank one, the secular
+equation is the **exact resummation of that same series** — so it carries no
+basin condition of any kind. `experiments_secular.py`, $n=500$:
+
+| $\sigma$ | 1e-2 | 1 | 1e3 | **1e8** |
+|---|---|---|---|---|
+| eigenvalue error | 1.6e-15 | 6.4e-16 | 1.3e-16 | **5.2e-16** |
+
+Ten orders of magnitude in coupling, identical accuracy. Nothing else in this
+repository can say that: every other map here has a basin, and BENCHMARKS.md
+flags diagonal-plus-low-rank as untested.
+
+Two structural facts make it cheap and safe. Cauchy interlacing pins each root
+into its own open interval $(d_i, d_{i+1})$, so a bracketed solve cannot
+converge to the wrong root or miss one — no ordering ambiguity, no deflation
+guesswork. And $f$ is monotone there, so bisection is unconditionally
+convergent. The $n$ roots are independent, so they are bisected **in lockstep**,
+one $n\times n$ evaluation per halving.
+
+## Orthogonality is the whole difficulty
+
+Forming $v_i \propto (D-\lambda_i)^{-1}z$ directly loses orthogonality badly
+when two roots are close: the computed $\lambda_i$ differs from the exact one
+by a rounding error that is *not* small compared with $(d_j - \lambda_i)$ at
+the nearest pole. The Gu–Eisenstat fix is to discard the given $z$ and
+recompute, by Löwner's formula, the $\hat z$ for which the *computed*
+$\lambda$ are exact roots. Measured, it is worth two to three orders of
+magnitude:
+
+| $n$ | with the fix | without |
+|---|---|---|
+| 200 | 1.8e-13 | 1.5e-11 |
+| 500 | 7.1e-13 | 4.0e-10 |
+
+It must be evaluated in log space — the products run over all $n$ terms, and
+at $n=500$ with a large $\sigma$ the numerator overflows to `inf` and the
+ratio becomes NaN. Löwner's theorem gives positivity, so absolute values lose
+nothing.
+
+## Cost: an asymptotic win that this implementation does not yet realize
+
+The algorithm is $O(n^2)$ against a dense solve's $O(n^3)$ — a factor of $n$,
+not a constant. The ratio does improve with size (0.22× → 0.63× over
+$n = 500 \to 2000$ in one run, 0.49× → 0.41× in another; the run-to-run noise
+on this container is larger than the trend over that range), but in pure
+NumPy it has not overtaken `dsyevd` by $n=2000$, and extrapolating puts the
+crossover near $n \approx 5000$. That is an implementation limit, not an
+algorithmic one: the inner loop is 60 memory-bound $n\times n$ passes, and
+LAPACK's $O(n^3)$ has an extremely small constant.
+
+Safeguarded Newton was tried to cut those 60 passes and was **worse on both
+counts** — accuracy fell from 1.6e-15 to 3.4e-13, and it ran slower, because
+$f$ and $f'$ together need two $n\times n$ passes per step, which more than
+cancels the fewer steps. Bisection stays.
+
+## Scope, stated plainly
+
+This is a rank-one method. `secular_eigh_lowrank` chains it for
+$A = D + U\Sigma U^\top$ and each update is exact, so the construction is
+exact — but the accumulated eigenvector matrix has to be rotated at every
+update, which is $O(n^3)$ each and gives away the advantage. Making genuine
+low-rank $O(n^2r)$ work needs the eigenvectors kept in factored Cauchy form
+and applied by a fast multipole scheme, which is what fast divide-and-conquer
+does and is not attempted here.
+
+So the honest summary is narrower than the headline: **a genuinely different
+kind of map — scalar, exact, basin-free — that is asymptotically better and
+not yet practically faster.** It is the only thing in this repository with no
+convergence condition at all, which is why it is recorded rather than
+discarded.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
@@ -1574,6 +1660,8 @@ separately and independently found to be load-bearing.
 | all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |
 | dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
 
+Not a dead end but not yet a win: the secular map (rank-one exact, no basin
+condition at any coupling, O(n^2) but a crossover near n~5000 in NumPy).
 Dead ends worth not retrying, all measured rather than assumed: one-sided
 Jacobi for the SCHUR form (works, but has no descent property, stalls on
 ~1 instance in 12, and is 68x LAPACK's dgees and 8x this repo's sdc_eigvals);
