@@ -1480,6 +1480,84 @@ are one mechanism, not a fast idea plus a safety device. Two independent
 attempts to do without it — one replacing the division (gradient flow), one
 avoiding the need for it (continuation) — both land back on it.
 
+---
+
+# A triangular fixed point: aiming at the Schur form
+
+Every map so far targets a diagonal matrix (SSJ, Brockett, QR/LR flows), a
+projector (`purify`, sign), or an eigenvector (IPT and family). All of them
+are therefore trying to **diagonalize**, and for a nonsymmetric matrix that is
+the wrong target twice over: the eigenvector basis can be arbitrarily
+ill-conditioned, so an exact diagonalization is numerically worthless when
+$\kappa(V)$ is large — and for a *defective* matrix it does not exist at all.
+
+The Schur form has neither problem. Every square matrix has one, the transform
+is unitary, and unitary means perfectly conditioned. So aim at a **triangular**
+fixed point instead — a target no other map here uses.
+
+Same retraction as SSJ, $X \leftarrow \mathrm{orth}(X(I+K))$ with $K$
+anti-Hermitian, but ask the linearization $T + (TK - KT)$ to annihilate only
+the *lower* triangle. Keeping the diagonal part of the commutator gives
+$K_{ij} = T_{ij}/(T_{jj}-T_{ii})$ for $i>j$, with $K_{ji} = -\overline{K_{ij}}$:
+a **one-sided** saturated Jacobi.
+
+That linearization is not good enough, and the reason is instructive. It
+ignores $T_{ji}$, which is fine when the matrix is nearly normal and useless
+when it is not — and "not" is exactly the case this map exists for. Using the
+*exact* $2\times 2$ Schur rotation instead (the plane rotation whose first
+column is an eigenvector of the block $\begin{psmallmatrix} T_{jj} & T_{ji}\\ T_{ij} & T_{ii}\end{psmallmatrix}$,
+giving the tangent $t = T_{ij}/(\lambda - T_{ii})$) turns a method that never
+converged into one that does.
+
+It then genuinely works. `experiments_schur.py`:
+
+| case | converged | iterations | lower/‖A‖ | eigenvalue error | unitarity |
+|---|---|---|---|---|---|
+| near-diagonal nonsymmetric | yes | 19 | 2.7e-15 | 2.6e-14 | 2.6e-14 |
+| Ginibre, dense non-normal | yes | 134 | 2.6e-14 | 2.4e-14 | 8.0e-14 |
+| near-defective | **no** | — | 1.4e-2 | 6.5e-2 | 1.4e-13 |
+
+## Why it is not competitive, which is a property of the target
+
+**There is no descent quantity, and there cannot be one.** In the symmetric
+case a single rotation in plane $(i,j)$ annihilates $T_{ij}$ *and* $T_{ji}$ at
+once, because they are equal — that is the classical Jacobi descent property,
+and it is what SSJ inherits. Here the two entries are independent: a rotation
+that annihilates $T_{ij}$ changes $T_{ji}$ arbitrarily. Nothing provably
+decreases, and measured, the lower-triangle norm is **not monotone** and can
+enter a limit cycle:
+
+| $n$ | 60 | 80 | 100 | 150 |
+|---|---|---|---|---|
+| monotone | yes | **no** | **no** | **no** |
+| outcome | 69 it | 134 it | **stalls at 2.9e-2** | 172 it |
+
+Over 12 instances per family it stalls on 1 in 12 for Ginibre and for
+near-diagonal at coupling 10, and 0 in 12 at coupling 1. So it usually works
+and is never guaranteed to.
+
+**And it is far off the incumbents.** At $n=200$ on Ginibre: 8.5 s against
+LAPACK `dgees` at 86 ms and `dgeev` at 27 ms — and against this repository's
+own `sdc_eigvals`, which solves the same problem in 0.6 s. Complex arithmetic
+throughout (needed for a genuinely triangular target) costs a factor of ~4 by
+itself.
+
+**The motivating claim failed outright.** Aiming at the Schur form was
+supposed to pay off precisely on *defective* matrices, where no diagonalization
+exists. It does not. A defective matrix has all its eigenvalues equal, so every
+denominator $T_{jj}-T_{ii}$ is zero, and a divide-by-gap generator has nothing
+to work with. **The Schur form existing does not make this map able to find
+it** — the obstruction was never the target, it was the generator.
+
+Which is the third independent time in this document that an attempt to escape
+the divide-by-gap generator lands back on it: replacing the division with a
+gradient (Brockett) costs ~800×; avoiding the need for it by continuation
+(homotopy) costs 26–248× and dies on exact degeneracy; changing the target it
+aims at (Schur) loses the descent property that made it reliable. The
+generator, the arctan saturation on it, and the symmetric pairing that gives
+it a descent property are one mechanism, and each piece has now been removed
+separately and independently found to be load-bearing.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
@@ -1496,8 +1574,10 @@ avoiding the need for it (continuation) — both land back on it.
 | all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |
 | dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
 
-Dead ends worth not retrying, all measured rather than assumed: homotopy
-continuation with basis refresh (globally convergent, solves rho = 20,000 and
+Dead ends worth not retrying, all measured rather than assumed: one-sided
+Jacobi for the SCHUR form (works, but has no descent property, stalls on
+~1 instance in 12, and is 68x LAPACK's dgees and 8x this repo's sdc_eigvals);
+homotopy continuation with basis refresh (globally convergent, solves rho = 20,000 and
 GOE where every fixed-point map here fails, but 26-248x SSJ and NaN on exact
 degeneracy); isospectral
 gradient flows (Brockett double bracket -- momentum accelerates it 26x and is
