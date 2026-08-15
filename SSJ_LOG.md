@@ -35,11 +35,13 @@ fp32 only. Phases own schedule *segments*.
 
 **Where this stands, honestly:** cold dense CPU solve now 16–18× LAPACK
 (from 28–42×), floor mostly irreducible on this axis. The undecided
-questions live elsewhere: (1) **GPU** — every shipped piece (gemm sweeps,
-batched-eigh blocks, pure-gemm IPT) is GPU-shaped, and the Colab notebook
-predates the schedule, the hybrid, and the mixed policy — updating it and
-running it is the highest-value open experiment; (2) **tracking** — SSJ's
-warm start already beats re-solving; the composed solver should inherit it.
+questions live elsewhere: (1) **GPU** — every shipped piece is GPU-shaped,
+and the Colab notebook now carries the FULL composition (#12): schedule,
+predictive NS tightening, IPT hybrid with the clean hand-off, mixed
+segments. The one remaining step is running it on a real card; nothing more
+can be learned about the GPU question from this box. (2) **tracking** —
+SSJ's warm start already beats re-solving; the composed solver should
+inherit it, unmeasured.
 
 ## What SSJ is, and where the cost sits
 
@@ -202,6 +204,7 @@ the tail-exclusion path fires.
 | 9 | **Anatomy of the pre-cliff phase, then a block-size SCHEDULE** (big blocks early, small late) | **the campaign's best result.** GOE n=800: 15 → 8 sweeps; wall 1.90× over plain, 2.13× with the hybrid — 13.5–15.9× LAPACK, from 28–34×. |
 | 10 | **Is the merge local?** K/B mass vs sorted distance; block-passes-only solver; banded-K map | **decisively no — with the campaign's sharpest mechanism finding.** Angles are local, couplings are not; rotation mass ≠ annihilation work. |
 | 11 | **The full composition: mixed × schedule × hybrid**, plus the fp64-phase block policy it needed | **champion config, 2.33× over plain (16–18× LAPACK) — and gains compose by Amdahl, not multiplication.** |
+| 12 | **Bring the GPU notebook up to the composed solver** (schedule, predictive NS, IPT hybrid, mixed segments) | **shipped and validated** — 50 config × spectrum rows pass on the NumPy path; hybrid runs GOE n=200 in 4 sweeps + 8 gemms. |
 
 ### 1. SSJ-BC — verified
 
@@ -896,3 +899,38 @@ the tracking niche.
 
 160 tests pass (1 new, pinning the fp64-phase tail-block policy on the
 fp32-invisible cluster).
+
+### 12. The GPU notebook now carries the composed solver
+
+The reflection has called the GPU run the highest-value open experiment since
+#10, but `ssj_gpu_colab.ipynb` predated everything the campaign shipped: it
+still had the #2-era unconditional Newton–Schulz floor (measured in #5 as a
+1.60× penalty), the old temporaries-heavy `_angles`, no schedule, no IPT, no
+hybrid. A GPU run of that notebook would have measured a solver two-and-a-half
+generations stale.
+
+Ported into the notebook's standalone solver, faithful to core through #11:
+per-sweep block schedules; the predictive NS tightening (margin 1e9, with the
+comment explaining why the always-on floor was a 1.60× loss); the in-place
+`_angles` arithmetic (keeping the notebook's documented GPU deviation — the
+tie branch runs unconditionally rather than paying a host sync); the mixed
+phases-own-schedule-segments policy; and a new cell with `ipt_rate`,
+`ipt_iterate` (pure gemm, in-place elementwise) and the `ssj_ipt` hybrid
+including the clean-hand-off QR from #8. Benchmark cells now run six configs
+(plain, BC32, schedule, mixed+schedule, hybrid, hybrid+mixed) against
+cuSOLVER, with the CPU control and the ratio-shift verdict joined on shared
+labels, and the framing text updated to the campaign's measured standing.
+
+**Validated the way the original was — by running the notebook's own cells on
+the NumPy path** (the solver is backend-agnostic): 50 config × spectrum rows
+all pass with accuracy asserted. Notable rows: hybrid+sched solves GOE n=200
+in **4 sweeps + 8 IPT gemms** (plain: 21 sweeps) and zero-diagonal in 4 + 6;
+exact degeneracy correctly never opens the gate and falls back to SSJ+blocks.
+The one honest caveat surfaced again: on the 1e-9 cluster the mixed hybrid's
+eigenvector orthogonality is 4.5e-10 (IPT vectors are only implicitly
+orthogonal; eigenvalues and residuals at full precision) — the validation
+bar encodes that documented trade rather than hiding it. Driver cells run
+end-to-end under a NumPy alias with the verdict join matching 6/6 rows.
+
+No solver-repo code changed; this tick ships measurement infrastructure. The
+GPU question is now fully instrumented and waits only for a card.
