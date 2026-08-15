@@ -242,3 +242,42 @@ def test_ns_target_floor_preserves_digits():
                               return_info=True)
         assert info["converged"]
         assert np.linalg.norm(V.T @ V - np.eye(120)) < 1e-10
+
+
+def test_block_schedule_cuts_sweeps_on_goe():
+    """Per-sweep block schedule: big blocks first inject the diagonal spread
+    the early sweeps are bottlenecked on (the attempt-#9 anatomy). Must beat
+    fixed m=32 by a clear margin on GOE, at full accuracy."""
+    A = goe(400, seed=1)
+    _, _, fixed = ssj_eigh(A, block_m=32, return_info=True)
+    w, V, sched = ssj_eigh(A, block_m=[200, 100, 32], return_info=True)
+    assert sched["converged"]
+    assert sched["sweeps"] <= fixed["sweeps"] - 3
+    assert_accurate(A, w, V)
+
+
+def test_block_schedule_scalar_singleton_equivalent():
+    """block_m=[32] must be exactly block_m=32 -- same path, same result."""
+    A = goe(150, seed=6)
+    w0, V0, i0 = ssj_eigh(A, block_m=32, return_info=True)
+    w1, V1, i1 = ssj_eigh(A, block_m=[32], return_info=True)
+    assert i0["sweeps"] == i1["sweeps"]
+    assert np.array_equal(w0, w1)
+    assert np.array_equal(V0, V1)
+
+
+def test_block_schedule_survives_degeneracy():
+    """Exact ties are the spectrum a schedule does NOT help (its bottleneck is
+    tie resolution, not spread) -- it must still be correct there."""
+    A = degenerate(200)
+    w, V, info = ssj_eigh(A, block_m=[100, 50, 32], return_info=True)
+    assert info["converged"]
+    assert_accurate(A, w, V, tol=1e-11)
+
+
+def test_block_schedule_entries_capped():
+    """Schedule entries above n//2 are capped, like the scalar."""
+    A = goe(60, seed=9)
+    w, V, info = ssj_eigh(A, block_m=[500, 32], return_info=True)
+    assert info["converged"]
+    assert_accurate(A, w, V)

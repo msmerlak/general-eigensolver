@@ -6,41 +6,43 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #8)*
+*(rewritten each tick; as of attempt #9)*
 
-**Fast eigensolvers divide by gaps.** Every method measured fast here takes
-steps of the form coupling/gap — Jacobi angles, IPT denominators, secular
-solves. Every method that doesn't (gradient/Brockett ~800×, homotopy, plain
-flows) is slow. Dividing by the gap is a Newton step in disguise: it uses
-curvature. Its price is that it explodes near resonance (gap → 0), so it only
-works inside a basin (ρ = max|W|/gap < 1) or behind a saturation.
+**Fast eigensolvers divide by gaps** — a Newton step in disguise. Its price is
+a basin (ρ = max|W|/gap < 1) or a saturation to survive outside one. Every
+slow method here (Brockett, flows, homotopy) declines to divide by the gap.
 
-**The two-phase decomposition is the deep structure.** Every practical solver
-= a *globalization* phase that buys the basin + a *divide-by-gap endgame* that
-exploits it. LAPACK: tridiagonalization, then gap-divided secular/QL steps.
-SSJ: saturated sweeps, then the same sweeps acting quadratically. The phases
-have different economics and the mistake this repo's cost discussions kept
-making was pricing them as one thing.
+**The solve has exactly two phases, and the anatomy is now measured** (#9):
+the pre-basin phase is ONE self-accelerating loop — couplings feed the
+diagonal, spread widens gaps, wider gaps shrink angles, smaller angles feed
+faster. Contraction improves monotonically (0.99 → 0.09); there is no plateau.
+The binding pair is *always adjacent in sorted diagonal order* — the
+constraint is always a local resonance. The basin then opens as a cliff (ρ
+falls through 1 in one sweep) exactly when the last eigenvalue-assignment
+resolves; the endgame after it is ~20% of sweeps and needs no manifold at all
+(IPT: pure gemm, v_jj = 1 — #8).
 
-**What the manifold is actually for.** SSJ's orthogonality constraint (QR,
-49% of every sweep — attempt #5) is not decoration: both of its saturations
-are load-bearing (arctan on angles; polar on the composed step — Cayley's
-weaker saturation diverges at n=800, attempt #7). But the saturations are only
-*needed outside the basin*. IPT proves the endgame needs no manifold at all:
-pin v_jj = 1, iterate one gemm per step, done. So the manifold tax is a
-globalization cost being paid during the endgame too, where it buys nothing.
+**So cost concentrates where spread is smallest.** The first half of a plain
+GOE solve buys ONE decade of error; the last third buys thirteen. Anything
+injecting diagonal spread up front collapses the expensive phase: that is
+what BC is, and doing it with a *schedule* — blocks of n/2, n/4, then 32 —
+is worth 15 → 8 sweeps at n=800 (#9). The exception proves the mechanism:
+exact degeneracy is bottlenecked on tie-resolution, not spread, and the
+schedule buys nothing there.
 
-**Corollary being tested now (attempt #8):** the right hybrid is
-globalize-cheaply-then-flee-the-manifold. The repo already ships the pieces —
-`ssj_ipt_eigh` (handoff gated on ρ < 0.5) and SSJ-BC (a globalizer: block
-passes hand the iterate √m of diagonal spread) — but they predate each other
-and have never been composed or measured together.
+**Load-bearing vs convention, as measured:** both saturations load-bearing
+(#7: Cayley's weaker one diverges, worse with n); manifold orthogonality
+load-bearing ONLY pre-cliff, and must be exact at the hand-off (#8's 1e-8
+bug); the fixed block size was a convention (#9); QR-every-sweep is
+load-bearing only in the sense that nothing cheaper survives (#7).
 
-**Deepest open question:** what is the *cheapest sufficient* globalization?
-The basin condition is ρ < 1, an O(n²) observable. SSJ buys it with O(n³)
-manifold sweeps; BC buys spread with batched small eigensolves. Whether
-something O(n²)-per-step can buy it (or whether the gate opens after just 2–3
-BC sweeps) decides how much of the n³ manifold work is actually necessary.
+**Deepest open question now:** the schedule converges toward "diagonalize two
+halves, merge by SSJ" — so the remaining cost IS the merge. After the halves
+are diagonalized, is the coupling effectively *banded in sorted order* (the
+binding pairs are only the ~n interleaving adjacencies)? If yes, the merge
+sweeps could act on a band at O(n²·b) instead of full frames at O(n³) — that
+is the experiment for a next tick, and it is where "beat LAPACK's D&C merge"
+either becomes real or dies.
 
 ## What SSJ is, and where the cost sits
 
@@ -200,6 +202,7 @@ the tail-exclusion path fires.
 | 6 | **Rebuild `_angles` in place**; O(n log n) tie detection instead of O(n²) | **shipped, bit-identical.** 2.0–2.9× on the map itself, **1.04–1.09× end to end** — diluted by Amdahl. |
 | 7 | **Cheapen the retraction** (target #2, 49% of a sweep): Cayley transform; re-verify the Newton–Schulz comparison | **negative, and it invalidates a number in #5.** Cayley does not converge at n=800. QR is the cheapest verified retraction. |
 | 8 | **Compose the globalizer with the manifold-free endgame** (`ssj_ipt_eigh` + BC), and instrument where the basin opens | **shipped, with a real bug found by the output assert.** The basin opens as a *cliff*; hybrid+BC = 12 sweeps + 6 gemms at n=800. |
+| 9 | **Anatomy of the pre-cliff phase, then a block-size SCHEDULE** (big blocks early, small late) | **the campaign's best result.** GOE n=800: 15 → 8 sweeps; wall 1.90× over plain, 2.13× with the hybrid — 13.5–15.9× LAPACK, from 28–34×. |
 
 ### 1. SSJ-BC — verified
 
@@ -732,3 +735,67 @@ sorting eigenvalue positions rather than resolving couplings.
 
 153 + 2 tests pass (`test_hybrid_composes_with_block_preconditioner`,
 `test_hybrid_falls_back_to_ssj_on_exact_ties`).
+
+### 9. Anatomy of the pre-cliff phase — and the block-size schedule it implies
+
+Attempt #8 left the question "what makes the pre-cliff phase long?" This tick
+instrumented it per sweep (all load-immune, shipped one-sweep code path):
+rel_off, contraction factor, ρ and the sorted-position distance of the pair
+attaining it, diagonal accuracy vs true eigenvalues, spread ratio, and the
+count of diagonal entries not yet within half a local gap of their eigenvalue.
+
+**The anatomy (GOE n=400 plain, 23 sweeps):**
+
+* **The binding pair is always adjacent** — sorted-position distance 1, every
+  sweep, every case measured. The constraint is always a local resonance.
+* **Assignment completes exactly at the cliff**: unassigned 378 → 13 → 0
+  precisely as ρ crosses 1. The cliff *is* the last level crossing resolving.
+* **No slow middle**: contraction improves monotonically 0.99 → 0.92 → 0.83 →
+  0.66 → 0.38 → 0.09. One self-accelerating loop — couplings feed the
+  diagonal, spread widens gaps, wider gaps shrink the saturated angles.
+* **Cost concentrates at small spread**: sweeps 0–8 move rel_off 9.9 → 4.5
+  (one decade); sweeps 15–23 move it thirteen decades. BC's mechanism is
+  visible directly: one BC sweep takes spread 0.105 → 0.637 vs 0.260 plain.
+
+**The lever: a per-sweep block-size schedule.** Attempt #4's grid only tested
+*fixed* m (flat optimum, a recorded dead end). The anatomy says m should be
+big exactly while spread is the bottleneck and small after. Measured, chained
+first, then shipped in-solver (`block_m` now accepts a sequence, last entry
+repeating; scalar path bit-identical):
+
+| case | fixed m=32 | schedule [n/2, n/4, 32] |
+|---|---|---|
+| GOE n=400 | 11 | **7** |
+| GOE n=800 | 15 | **8** |
+| clustered 1e-9 n=200 | 9 | **7** (as [100,50,32]) |
+| 5-fold deg n=200 | 25 | 27 — **no help, as the mechanism predicts** |
+
+Degeneracy is bottlenecked on tie-resolution, not spread; the schedule is not
+for it. Accuracy asserted on every configuration (≤6e-15 / ≤4e-14 residual).
+
+**Wall — both runs CLEAN (3.2% / 4.1% contamination), the first fully clean
+wall session of this log:**
+
+| n=800 | ms | ×LAPACK | vs plain |
+|---|---|---|---|
+| plain ssj | 2600 | 33.9× | 1.00× |
+| BC32 fixed | 1800 | 23.5× | 1.44× |
+| BC schedule | 1368 | 17.8× | 1.90× |
+| hybrid + BC schedule | **1219** | **15.9×** | **2.13×** |
+
+(n=400: 1.95× and 2.06×, 13.5× LAPACK.) This also delivers the wall number
+owed by #8: the IPT hand-off is worth a further ~11% on top of the schedule,
+clean-measured. **The campaign's aggregate on a cold GOE solve now stands at
+2.1×, taking SSJ from 28–34× LAPACK to 13.5–15.9×.**
+
+**What the schedule is, said honestly:** [n/2, …] is one level of
+divide-and-conquer with an SSJ merge — diagonalize two halves by batched
+`eigh`, then let saturated sweeps merge them. The remaining cost IS the merge.
+That reframing sets the next question (now in the reflection section): after
+the halves are diagonalized, is the coupling effectively banded in sorted
+order? If the binding pairs are only the ~n interleaving adjacencies, merge
+sweeps could act on a band at O(n²·b), which is exactly the line that decides
+whether an SSJ-style merge can ever compete with LAPACK's O(n²) secular merge.
+
+159 tests pass (4 new: schedule wins on GOE, scalar/singleton bit-equivalence,
+degeneracy guard, entry capping).

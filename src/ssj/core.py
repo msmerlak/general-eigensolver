@@ -395,7 +395,11 @@ def ssj_eigh(
         with prologue=3 on spectrum 2^-i) and do nothing for flat spectra
         like GOE. Each step costs about one sweep. Ignored when X0 is given.
     block_m : block size for the block-cluster preconditioner (SSJ-BC).
-        0 (default) disables it. Each sweep first runs `block_passes` exact
+        0 (default) disables it. May also be a sequence giving a PER-SWEEP
+        schedule (last entry repeats): big blocks early inject the diagonal
+        spread the first sweeps are bottlenecked on, small blocks late do the
+        adjacent decoupling that is all the endgame needs. [n//2, n//4, 32]
+        measured GOE n=800 at 8 sweeps against fixed-32's 15. Each sweep first runs `block_passes` exact
         block-Jacobi passes over sorted-contiguous blocks of diag(B), which
         collapses the saturated-pair population the plain map has to grind
         through. This is a preconditioner AROUND the map, not a change to it:
@@ -459,9 +463,24 @@ def ssj_eigh(
         raise ValueError(f"unknown precision {precision!r}")
 
     n = A.shape[0]
+    # block_m may be an int or a per-sweep schedule (a sequence; its last
+    # entry repeats). The anatomy of the pre-cliff phase (SSJ_LOG attempt #9)
+    # is why a schedule exists: early sweeps are bottlenecked on diagonal
+    # SPREAD, which big blocks inject at ~sqrt(m) per pass, while late sweeps
+    # only need adjacent pairs decoupled, which small blocks do at a fraction
+    # of the cost. Measured: [n/2, n/4, 32...] takes GOE n=800 from 15 sweeps
+    # to 8. On spectra whose bottleneck is not spread (exact degeneracy) a
+    # schedule buys nothing -- keep a scalar there.
     # Never let a "block" be the whole problem: at block_m >= n the pass would
     # just be a call to the dense eigensolver, which is not what SSJ is.
-    block_m = min(block_m, n // 2)
+    if np.ndim(block_m) == 0:
+        block_sched = None
+        block_m = min(int(block_m), n // 2)
+        block_active = bool(block_m)
+    else:
+        block_sched = tuple(min(int(m), n // 2) for m in block_m) or (0,)
+        block_m = block_sched[0]
+        block_active = any(block_sched)
     norm_A = _spectral_norm_estimate(A)
     if norm_A == 0.0:  # zero matrix
         w = xp.zeros(n)
@@ -500,6 +519,8 @@ def ssj_eigh(
             converged = True
             break
 
+        if block_sched is not None:
+            block_m = block_sched[min(sweeps, len(block_sched) - 1)]
         if block_m and rel_off > block_until:
             for r in range(block_passes):
                 B, X = _block_pass(
@@ -534,7 +555,7 @@ def ssj_eigh(
                 # factorization; the stagnation guard floors an unreachably
                 # tight target at roundoff.
                 X, _ = _orth_ns_adaptive(Y, target=_ns_target(
-                    rel_off * rel_off, block_m, tol, rel_off, prev_rel))
+                    rel_off * rel_off, block_active, tol, rel_off, prev_rel))
             else:
                 X = _orth_qr(Y) if method == "auto" else _orth_cholqr2(Y)
         elif method == "gemm":
@@ -553,7 +574,7 @@ def ssj_eigh(
             if sigma_c > 0.1:
                 Y = Y / (1.0 + sigma_c * sigma_c) ** 0.25
             X, ns_gemms = _orth_ns_adaptive(Y, target=_ns_target(
-                gemm_ns_factor * rel_off, block_m, tol, rel_off, prev_rel))
+                gemm_ns_factor * rel_off, block_active, tol, rel_off, prev_rel))
             gemms += ns_gemms
         else:
             raise ValueError(f"unknown method {method!r}")
