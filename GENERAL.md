@@ -1312,6 +1312,8 @@ honest comparison is step counts. Run out to 8,000 steps on a GOE matrix,
 Brockett reaches 8.6e-4 and is contracting by **0.999707 per step** — steady,
 monotone, no stalling, exactly what the theorem promises — which extrapolates
 to **~70,000 further steps** for 1e-12. Against SSJ's **13**. Call it 6,000×.
+That margin is not the last word: the next subsection accelerates the flow by
+26× and brings it to ~800×.
 
 **A mechanism I proposed and then had to discard.** The natural explanation is
 that the double bracket's local rate goes like the *product* of the weight gap
@@ -1322,20 +1324,84 @@ $\approx 2\times10^{-2}$ throughout, while SSJ stays at 13–14 sweeps. So the
 slowness is not min-gap sensitivity, and I have not identified what it *is*.
 The measurement stands; the story I had for it did not survive contact.
 
-Two things worth keeping from this:
+## Accelerating it — which works, and by how much
+
+A steady linear rate is exactly what acceleration machinery exists for, so
+stopping at the plain flow was premature. Four candidates, `experiments_accel.py`
+(n=50 GOE, 4,000 steps each):
+
+| | off/‖A‖ reached | matmul-eq |
+|---|---|---|
+| plain (backtracking) | 7.3e-3 | 16,156 |
+| proper line search | 4.2e-3 | 10,663 |
+| **momentum, β = 0.9** | **4.4e-6** | 40,270 |
+| CG (Polak–Ribière) | 1.6e-4 | 38,069 |
+| preconditioned $N$ | 6.9e-2 *(worse)* | 21,385 |
+
+**Momentum is the one that works**, and it is worth more than the table
+suggests once β is tuned. For a gradient method with rate $1-\kappa$, momentum
+should give $1-\sqrt{\kappa}$; here $\kappa \approx 2.9\times10^{-4}$, so the
+prediction is $\beta_{\mathrm{opt}} \approx 0.966$ and rate $\approx 0.983$.
+Measured: best at $\beta = 0.98$, rate **0.9897** — close enough to call the
+mechanism confirmed. Sweeping β on a GOE matrix:
+
+| β | 0 | 0.5 | 0.8 | 0.9 | 0.95 | **0.98** | 0.99 |
+|---|---|---|---|---|---|---|---|
+| rate/step | 0.99971 | — | 0.99789 | 0.99705 | 0.99732 | **0.98969** | 0.99497 |
+| result | — | — | — | — | — | **converged, 2,955 steps** | — |
+
+So the flow goes from **~78,000 extrapolated steps and no convergence** to
+**~2,900 steps and 1e-12**, a 26× gain in steps and ~11× in matmul-equivalents
+(the accelerated step costs more). Consistent across instances: 2,955 / 2,884 /
+2,962 steps on three GOE matrices.
+
+This does **not** contradict BENCHMARKS.md's finding that generator-space
+momentum fails for SSJ. That is a different map: SSJ is a saturated Newton
+iteration whose stabilizer momentum destroys, while this is a genuine gradient
+flow, where momentum is the textbook accelerator. The two results are about
+opposite mechanisms and both are as expected.
+
+Three further details, measured:
+
+* **The line search is load-bearing, not overhead.** Momentum with a fixed τ
+  diverges outright at β = 0.98 (off/‖A‖ → 0.65). The per-step cost of the
+  search buys the stability that makes the large β usable.
+* **Preconditioning $N$ made it worse**, which is the opposite of what I
+  expected. The motivation was sound — near a diagonal fixed point the (i,j)
+  mode decays like the product $(n_j-n_i)(\lambda_j-\lambda_i)$, so equalizing
+  those products by taking weight gaps inversely proportional to eigenvalue
+  gaps should balance the rates, and doing so turns $\Omega_{ij}$ into
+  $A_{ij}/(\lambda_j-\lambda_i)$, i.e. *SSJ's own generator*. The tidy
+  conclusion would be "SSJ is the optimally preconditioned double-bracket
+  flow". As implemented (cumulative reciprocal gaps, rescaled) it is 6.9e-2
+  against the plain flow's 7.3e-3 — nearly ten times worse. The idea may still
+  be right and my construction wrong; as measured, it does not work.
+* **Acceleration does not rescue the wide-spectrum case.** On a geometrically
+  spread spectrum momentum still fails to converge in 8,000 steps, while SSJ
+  needs 18 sweeps.
+
+## Where that leaves the family
+
+Accelerated, the gap to SSJ narrows from ~6,000× to **~800×** in
+matmul-equivalents (27,848 against 35; 744–802× across three GOE instances).
+So the earlier verdict of "do not retry, four orders of magnitude" was too
+strong on the margin and right on the conclusion: this family **can** be
+accelerated substantially and is still nowhere near competitive.
+
+Two things worth keeping:
 
 * **The divide-by-gap nonlinearity is where SSJ's speed lives.** It is the one
-  thing that changes between these two maps, and it is worth three to four
-  orders of magnitude. The arctan saturation that looks like a safety device
-  is what makes dividing by a vanishing gap survivable — the price of the
-  fast generator, not a decoration on it.
-* **Cholesky-LR is the best of the losers**, and beats the QR flow per unit
-  cost on GOE (4,680 matmul-eq to 2.1e-7, against 6,680 to 1.2e-4), because
-  $n^3/3$ per step is a quarter of QR's $4n^3/3$. Still ~10× worse than SSJ.
+  thing that changes between these two maps, and even after acceleration it is
+  worth ~800×. The arctan saturation that looks like a safety device is what
+  makes dividing by a vanishing gap survivable — the price of the fast
+  generator, not a decoration on it.
+* **Cholesky-LR is the best of the unaccelerated losers**, and beats the QR
+  flow per unit cost on GOE (4,680 matmul-eq to 2.1e-7, against 6,680 to
+  1.2e-4), because $n^3/3$ per step is a quarter of QR's $4n^3/3$.
 
-Do not retry the Brockett/Chu/Helmke–Moore gradient-flow family for speed. It
-is the right answer to a different question — it is the one map here that comes
-with a proof — and the proof costs about four orders of magnitude.
+The gradient-flow family remains the right answer to a different question — it
+is the one map here that comes with a convergence proof — and the proof still
+costs between two and three orders of magnitude after its best acceleration.
 
 ## The map, for future work
 
@@ -1354,8 +1420,9 @@ with a proof — and the proof costs about four orders of magnitude.
 | dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
 
 Dead ends worth not retrying, all measured rather than assumed: isospectral
-gradient flows (Brockett double bracket, ~6,000x SSJ's step count; QR and
-Cholesky-LR flows 7-10x, section above); Anderson
+gradient flows (Brockett double bracket -- momentum accelerates it 26x and is
+the one thing that does, but it stays ~800x SSJ; QR and Cholesky-LR flows
+7-10x, section above); Anderson
 acceleration on IPT (no basin extension at any depth); Jacobi–Davidson, both
 diagonal-projected and inner-PCG variants (no improvement or strictly worse
 total cost than plain Davidson); LOBPCG/block-Davidson on the $k$-eigenpair
