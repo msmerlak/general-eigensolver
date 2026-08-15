@@ -1808,6 +1808,29 @@ to be.
 Recorded as `experiments_inertia.py`, not shipped: it is banded-only where
 `window_eig` takes any dense Hermitian, so it is a strictly narrower tool.
 
+## What a certificate certifies
+
+One further caveat is worth stating separately, because it generalizes beyond
+this map and beyond this repository. Maehly deflation of the moments cancels
+catastrophically within $\sqrt{\epsilon}\|A\|$ of an already-found root — the
+pole $\mu/(\sigma-\lambda)$ is known only to $\epsilon\|A\|$ in $\lambda$ —
+producing a bogus tiny step that reads as convergence. On one family that
+silently returned a **duplicated root and skipped a real one, at 1e-3 relative
+error, while the count bookkeeping stayed perfectly self-consistent**.
+(Reported by the exploring agent, which then fixed it with a
+$\sqrt{\epsilon}$ stand-off; I did not re-derive this one, unlike the inertia
+audit above.)
+
+The general point stands on its own without needing that measurement:
+$\nu(\sigma)$ constrains **how many** eigenvalues lie below $\sigma$ and says
+nothing whatever about whether a returned $\lambda$ is accurate. A completeness
+certificate protects the count, not the value — so it can be fully consistent
+around an answer that is wrong, which is a more dangerous failure than an
+obviously missing one. This repository leans on exactly this kind of guarantee
+in `window_eig`, whose selling point over ARPACK is a *certified count*; that
+certificate is equally silent about the accuracy of the eigenpairs it counts,
+and the tests assert residuals separately for precisely that reason.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
