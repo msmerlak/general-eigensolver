@@ -53,8 +53,22 @@ Incumbents to beat, by regime:
 
 ## Recurring lesson
 
-Three independent attempts to escape the divide-by-gap generator each landed
+**Four** independent attempts to escape the divide-by-gap generator each landed
 back on it: replacing the division (Brockett) costs ~800×, avoiding the need
-for it (homotopy) costs 26–248× and dies on degeneracy, and changing its target
-(Schur) loses the descent property. The generator, the arctan saturation on it,
-and the symmetric pairing that gives it descent are **one mechanism**.
+for it (homotopy) costs 26–248× and dies on degeneracy, changing its target
+(Schur) loses the descent property, and reconditioning its coordinates (Perron
+balancing) is provably a no-op — ρ(J) is a diagonal-similarity invariant. The
+generator, the arctan saturation on it, and the symmetric pairing that gives it
+descent are **one mechanism**.
+
+So a candidate that merely re-parameterizes the locator is very unlikely to
+pay. The open ground is elsewhere: state types nobody has used here
+(stochastic/sampling dynamics, moments or continued-fraction coefficients,
+factorizations as state, hierarchical/low-rank off-diagonal structure), or the
+regimes the ledger records as unsolved (2D Anderson lattice; dense
+far-from-diagonal below `sdc_eigvals` cost; exact degeneracy in a locator).
+
+A second lesson, from #31: **when the outcome is cheaper to observe than to
+predict, invest in cheap failure, not better prediction.** A candidate whose
+value is a better convergence *predictor* must beat the cost of simply
+attempting the solve — measured, ρ(|J|) did not.
