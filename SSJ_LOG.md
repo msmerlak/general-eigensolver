@@ -91,8 +91,13 @@ found load-bearing:
 1. **Cut the sweep count** (13–20 today). This is the dominant term and the
    most valuable direction. Shifts, deflation of converged columns, a better
    first sweep, anything that reduces iterations without breaking the mechanism.
-2. **Cheapen the retraction** (0.67 of the 2.67 per sweep). The Newton–Schulz
-   endgame already does this late; doing it earlier or cheaper is open.
+2. **Cheapen the retraction.** Now the single largest term by a wide margin:
+   measured at **8.73 of a sweep's 17.70 gemm-equivalents (49%)** at n=800, not
+   the 0.67 the flop model claimed. Newton–Schulz is the only cheaper
+   orthogonalization found (4.29 at a fixed target), but swapping wholesale
+   measured only 1.05× end to end (attempt #5) — its adaptive target and the
+   power iteration eat the difference. Anything that makes the retraction
+   genuinely cheaper is now the highest-value engineering target in this list.
 3. **Exploit structure** — banded/sparse input, where forming XᵀAX densely is
    wasteful.
 4. **Deepen mixed precision** beyond the current 1.3–1.4×.
@@ -146,6 +151,7 @@ the tail-exclusion path fires.
 | 3 | **Wall time for SSJ-BC**, the measurement owed by #2 — and the dense-`Qfull` defect it exposed | **fixed and measured.** 1.27–2.11× wall. The block application was costing `n/m`× the flops it needed to. |
 | 4 | **Attack the block pass's memory-bound overhead** — config grid, then a component-level breakdown | **mostly negative.** The hoped-for 1.35× is not there. Config tuning is a flat optimum; one real fix found (n=800 1.38× → **1.47×**). |
 | 5 | **Profile the sweep body**; test whether the cheaper retraction wins | **cost model corrected (6.6× off); one hypothesis refuted, one real 1.60× win.** `method="gemm"` + BC is now the fastest configuration. |
+| 6 | **Rebuild `_angles` in place**; O(n log n) tie detection instead of O(n²) | **shipped, bit-identical.** 2.0–2.9× on the map itself, **1.04–1.09× end to end** — diluted by Amdahl. |
 
 ### 1. SSJ-BC — verified
 
@@ -480,3 +486,62 @@ by which point its `rel_off²` target is already tight.
 28.9–29.7× LAPACK against `auto` + BC's 30.1–36.5×, and 47× before this fix.
 134 tests pass, 3 new — including one pinning `_ns_target` directly so the
 early-loose/late-tight behaviour cannot silently regress.
+
+### 6. `_angles` rebuilt in place — bit-identical, and Amdahl-limited
+
+Attempt #5's profile made `_angles` the second-largest term in a sweep (4.82
+gemm-equivalents at n=800, 9.29 at n=400 — a third of the sweep there). It had
+never been optimized. Two structural observations, both testable:
+
+* **Tie detection was O(n²) and needn't be.** Off the diagonal, `gap_ij = 0`
+  exactly when `d_i == d_j`, so the entire question is answered by sorting the
+  diagonal and checking adjacent pairs — **O(n log n)** — instead of building
+  an n² mask with two comparisons, an AND and a reduction.
+* **`nan_to_num` scanned all n² for nothing.** With no tied diagonal entries
+  the only non-finite entries are ON the diagonal (`gap_ii = 0`), and
+  `fill_diagonal` clears those regardless.
+
+Plus the arithmetic is now built in place (`out=`, `/=`, `*=`) rather than
+through four temporaries.
+
+**`_angles` alone**, quiet box, min-of-9, in gemm-equivalents:
+
+| n | shipped | rebuilt | speedup |
+|---|---|---|---|
+| 400 | 9.29 | **2.30** | 4.04× |
+| 800 | 5.13 | **2.48** | 2.07× |
+| 1200 | 3.49 | **1.23** | 2.85× |
+
+On an exactly-degenerate spectrum — where the tie branch *does* fire, so only
+the in-place arithmetic helps — it is still 2.0–3.9×. That was the surprise:
+most of the win is the temporaries, not the skipped scans.
+
+**Bit-identical output**, verified against a naive transcription of the formula
+on ten cases: GOE, complex Hermitian, exact degeneracy, zero diagonal (every
+pair tied), zero-diagonal complex, identity, all-zeros, pure diagonal, a single
+zero coupling, and a single tied pair. Not "close" — `array_equal`. The
+19 new tests in `tests/test_angles.py` assert that against the oracle, plus
+exact anti-Hermiticity, the π/4 saturation bound, and that the input is not
+mutated.
+
+**End to end, however, 1.04–1.09×** (quiet box, interleaved min-of-5,
+contamination 3.8% and 7.9%):
+
+| config | n=800 | n=1200 |
+|---|---|---|
+| `auto` | 1.04× | 1.07× |
+| `auto` + BC32 | 1.09× | 1.05× |
+| `gemm` + BC32 | 1.06× | 1.08× |
+
+(An n=400 run showed 1.10–1.19× but drifted 20.7% and is discarded.)
+
+**This is Amdahl, and it was predictable from #5's profile**: `_angles` is 27%
+of a sweep at n=800, so halving it caps the gain at ~1.16×. Worth having —
+it is free, exact, and largest at the small-to-mid sizes where SSJ is most
+competitive — but it does not move the standing. **The retraction is 49% of a
+sweep and is where the remaining headroom is.**
+
+One caution for reading this log: the `×LAPACK` column is not comparable
+across attempts. LAPACK `eigh` at n=1200 measured 171.7 ms in attempt #5 and
+214.1 ms here on the same box. Only the interleaved old/new ratios within a
+single run are trustworthy.

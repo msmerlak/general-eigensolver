@@ -90,24 +90,35 @@ def _angles(B: np.ndarray) -> np.ndarray:
     d = xp.real(xp.diag(B))
     absB = xp.abs(B)
     gap = d[None, :] - d[:, None]  # gap_ij = d_j - d_i, exactly antisymmetric
+    # Built in place: this map is O(n^2) but ran at 9.3 gemm-equivalents at
+    # n=400 -- a third of the whole sweep -- almost all of it temporaries.
     with np.errstate(divide="ignore", invalid="ignore"):
-        theta = 0.5 * xp.arctan(2.0 * absB / gap)
-    # 0/0 (B_ij = 0 at zero gap): no rotation.
-    theta = xp.nan_to_num(theta, nan=0.0)
-    # Zero gap with B_ij != 0: the angle saturates at +-pi/4, but the raw
-    # formula gives +pi/4 on BOTH (i,j) and (j,i) (each sees a +0 gap), which
-    # breaks anti-Hermiticity -- orient the tie by the triangle instead.
-    tie = (gap == 0.0) & (absB > 0.0)
-    if bool(tie.any()):
+        theta = absB * 2.0
+        theta /= gap
+        xp.arctan(theta, out=theta)
+        theta *= 0.5
+    # Off the diagonal, gap_ij = 0 exactly when d_i == d_j, so the whole tie
+    # question is answered by an O(n log n) pass over the diagonal instead of
+    # three O(n^2) ones. With no ties the only non-finite entries are ON the
+    # diagonal (gap_ii = 0), which fill_diagonal clears regardless, so the
+    # nan_to_num scan is unnecessary too.
+    if bool((xp.diff(xp.sort(d)) == 0.0).any()):
+        # 0/0 (B_ij = 0 at zero gap): no rotation.
+        theta = xp.nan_to_num(theta, nan=0.0)
+        # Zero gap with B_ij != 0: the angle saturates at +-pi/4, but the raw
+        # formula gives +pi/4 on BOTH (i,j) and (j,i) (each sees a +0 gap),
+        # which breaks anti-Hermiticity -- orient the tie by the triangle.
+        tie = (gap == 0.0) & (absB > 0.0)
         one = xp.ones((n, n), dtype=theta.dtype)
         upper = xp.triu(one, 1) - xp.tril(one, -1)
         theta = xp.where(tie, (np.pi / 4.0) * upper, theta)
     if B.dtype.kind == "c":
         nonzero = absB > 0
         phase = xp.where(nonzero, B / xp.where(nonzero, absB, 1.0), 0.0)
+        K = theta * phase  # real theta times complex phase: needs a new array
     else:
-        phase = xp.sign(B)
-    K = theta * phase
+        theta *= xp.sign(B)
+        K = theta
     xp.fill_diagonal(K, 0.0)
     return K
 
