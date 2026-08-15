@@ -89,7 +89,6 @@ def _roots(d, w, sigma, iters=60):
         fa = np.where(same & ~stuck, fm, fa)
         b = np.where((~same) & ~stuck, m, b)
     return 0.5 * (a + b)
-    return 0.5 * (a + b)
 
 
 def _loewner(lam, d):
