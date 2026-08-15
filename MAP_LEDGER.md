@@ -73,3 +73,16 @@ A second lesson, from #31: **when the outcome is cheaper to observe than to
 predict, invest in cheap failure, not better prediction.** A candidate whose
 value is a better convergence *predictor* must beat the cost of simply
 attempting the solve — measured, ρ(|J|) did not.
+
+A third, from #32, and the sharpest filter yet on candidates: **a method that
+itself needs factorizations can never win the sparse/interior regime**, because
+shift-invert amortizes *one* factorization across all $k$ eigenpairs while any
+shift-varying method pays a new one per shift (measured: ~1400
+factorization-equivalents against 1). The entire reason `ipt_eig_partial` wins
+there by 8–347× is that it needs *none*. So a candidate aimed at that regime
+must be genuinely factorization-free; if it factorizes at all, it is competing
+on ARPACK's home ground with a handicap.
+
+A fourth, also from #32: **a completeness certificate protects the count, not
+the value.** It can be perfectly self-consistent around a wrong answer. Do not
+accept "the certificate agrees" as evidence of accuracy.
