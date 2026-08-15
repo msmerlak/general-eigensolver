@@ -268,15 +268,20 @@ def _block_pass(B, X, m: int, offset: int):
     blocks = B[:keep, :keep].reshape(nb, m, nb, m)[idx, :, idx, :]
     blocks = (blocks + blocks.conj().transpose(0, 2, 1)) / 2.0
     Q = xp.linalg.eigh(blocks)[1]  # batched over the leading axis
+    Qh = Q.conj().transpose(0, 2, 1)
 
-    # Assemble the block-diagonal factor once so applying it is two gemms
-    # rather than 2*nb small ones.
-    Qfull = xp.zeros((keep, keep), dtype=B.dtype)
-    Qfull.reshape(nb, m, nb, m)[idx, :, idx, :] = Q
+    # Apply Q block-diagonally, batched. Materializing the (keep, keep)
+    # block-diagonal factor and using one dense gemm instead costs n/m times
+    # the flops -- 3.0 gemm-equivalents per pass at n=800, m=32, against 0.12
+    # here -- which measured as most of the sweep gain being handed back.
+    def _rmul(M):  # M (r, keep) -> M with each column block times its Q_b
+        r = M.shape[0]
+        return ((M.reshape(r, nb, m).transpose(1, 0, 2) @ Q)
+                .transpose(1, 0, 2).reshape(r, keep))
 
-    X[:, :keep] = X[:, :keep] @ Qfull
-    B[:, :keep] = B[:, :keep] @ Qfull
-    B[:keep, :] = Qfull.conj().T @ B[:keep, :]
+    X[:, :keep] = _rmul(X[:, :keep])
+    B[:, :keep] = _rmul(B[:, :keep])
+    B[:keep, :] = (Qh @ B[:keep, :].reshape(nb, m, n)).reshape(keep, n)
     return (B + B.conj().T) / 2.0, X
 
 

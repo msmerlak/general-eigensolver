@@ -134,6 +134,7 @@ the tail-exclusion path fires.
 |---|---|---|
 | 1 | **SSJ-BC**: block-cluster preconditioner (block-Jacobi pass on sorted-diagonal blocks) + mass-capped angle gate + Newton–Schulz target floor | **real, verified independently — the first genuine improvement.** See below. |
 | 2 | **Integrate SSJ-BC into `src/ssj/core.py`** behind `block_m`, default off; batched block pass; test the `block_until` gate | **shipped.** Sweep gains reproduce exactly. Two inherited claims did *not* survive re-measurement — see below. |
+| 3 | **Wall time for SSJ-BC**, the measurement owed by #2 — and the dense-`Qfull` defect it exposed | **fixed and measured.** 1.27–2.11× wall. The block application was costing `n/m`× the flops it needed to. |
 
 ### 1. SSJ-BC — verified
 
@@ -257,8 +258,63 @@ a knob, defaulted off. **Had I shipped the default I reasoned my way to rather
 than the one I measured, degenerate spectra would have lost a third of the
 gain silently** — the same shape of error as attempt #1's untested defaults.
 
-**Not yet measured: wall time.** The batched rewrite changes the constant, so
-attempt #1's 1.21–1.46× does not carry over, and the box was at load 1.96 when
-this entry was written. Sweeps above are load-immune and stand; the wall
-figure is owed. Note the sweep ratio is *not* a wall ratio — a BC sweep buys a
-batched `eigh` and two extra gemms.
+**Wall time: measured in attempt #3**, which also found and fixed a defect in
+what this attempt shipped. The sweep ratio is *not* a wall ratio — a BC sweep
+buys a batched `eigh` and the cost of applying it.
+
+### 3. Wall time — and the defect measuring it exposed
+
+Attempt #2 shipped sweep counts and owed a wall figure. Measuring it found
+that **most of the sweep gain was being handed straight back.**
+
+**The defect.** #2 assembled the block-diagonal factor into a dense
+`(keep, keep)` matrix so that applying it was "two gemms rather than 2·nb
+small ones". That is a flop *pessimization*: a dense gemm against a
+block-diagonal operator does `n/m` times the necessary work. Modelled, in
+n³-gemm units, per pass:
+
+| n | batched eigh | dense `Qfull` | block-diagonal | waste |
+|---|---|---|---|---|
+| 200 | 0.319 | 2.765 | 0.461 | 6.0× |
+| 400 | 0.080 | 2.765 | 0.230 | 12.0× |
+| 800 | 0.021 | 3.000 | 0.120 | 25.0× |
+
+A sweep is ~2.67 gemm-equivalents and `block_passes=2`, so the dense form was
+adding ~6.0 — **more than doubling the cost of every sweep**. This is
+load-immune arithmetic and needs no quiet box to trust.
+
+**The fix.** Apply Q batched over the `(nb, m, m)` stack via reshape and
+transpose, with no Python loop and no dense factor. Wall, before → after:
+
+| case | before fix | after fix |
+|---|---|---|
+| GOE n=200 | 1.10× | **1.27×** |
+| GOE n=400 | 1.12× | **1.39×** |
+| GOE n=800 | 1.15× | **1.38×** |
+| 5-fold deg n=200 | 1.46× | **1.67×** |
+| clustered 1e-9 n=200 | 1.91× | **2.11×** |
+
+131 tests still pass, including block-pass monotonicity and orthogonal
+similarity, so the batched application is exactly equivalent.
+
+**Measurement method**, since the box is shared and was not reliably quiet:
+the script blocks until the 1-minute load average is under 0.40, interleaves
+default / BC / LAPACK *within each repetition* so drift lands on all three
+equally, takes min-of-7, and re-times LAPACK at the end as a contamination
+check. That check reported 16–17% drift — **downward** (LAPACK 21.6 → 18.0 ms
+at n=400), i.e. the box got quieter as the run progressed, so the absolute
+`BC/LAPACK` column carries ±15% but the interleaved speedup column does not.
+For calibration, LAPACK here runs 1.15–1.25× the quiet-box reference recorded
+at the top of this log.
+
+**Still unexplained, and the next target.** At n=800 the flop model predicts
+1.87× (77.4 gemm-equivalents against 41.3) but wall delivers 1.38×. The gap is
+that a block pass is **memory-bound, not flop-bound**: it does two full n²
+gathers (`B[p][:, p]`) plus the reshape/transpose copies, none of which the
+flop model counts. Removing or fusing those gathers is the concrete next
+improvement, and would be worth ~1.35× on top of what is measured here.
+
+**Where this leaves SSJ-BC:** 17–31× LAPACK on GOE, against 20–46× for the
+shipped default. A real improvement, and still not competitive on a cold dense
+solve — which is what the GPU notebook exists to re-ask on hardware where the
+incumbent is weaker.
