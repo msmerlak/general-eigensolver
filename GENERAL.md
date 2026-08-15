@@ -1264,6 +1264,79 @@ from 49/120 to 32/120 **while adding regressions**.
   repair the former. The two are complementary, and the sparse recommendation
   is unchanged: keep IPT, escalate to blocks.
 
+---
+
+# Isospectral gradient flows: a whole family, closed
+
+The Riccati/Brillouin–Wigner map above is still a *locator* method — pin a
+coordinate, correct the tail, divide by level gaps. Every fast map in this
+repository does that, which is exactly why they all need the diagonal to carry
+spectral information. The structural question is whether a map can avoid
+denominators altogether.
+
+One canonical family does: **isospectral gradient flows**. Brockett's double
+bracket
+
+$$\dot A = [A,[A,N]], \qquad N = \mathrm{diag}(n_1 < \cdots < n_n)$$
+
+is the gradient flow of $\mathrm{tr}(NA)$ on the orbit $\{Q^\top A Q\}$. Its
+generator is $\Omega = [A,N]$, i.e. $\Omega_{ij} = A_{ij}(n_j - n_i)$, and
+$\Omega$ is antisymmetric, so $A \leftarrow Q^\top A Q$ with
+$Q = \mathrm{orth}(I + \tau\Omega)$ is *exactly* isospectral. Set beside SSJ
+the difference is one operation:
+
+$$\text{SSJ: } K_{ij} \sim \frac{A_{ij}}{d_j - d_i} \qquad\qquad \text{Brockett: } \Omega_{ij} = A_{ij}\,(n_j - n_i)$$
+
+**divide by the gap, or multiply by a weight.** Both cost $O(n^2)$
+elementwise, both use the same retraction, both are isospectral. And the
+gradient version has what SSJ conspicuously lacks — Brockett (1991) proves it
+converges to a diagonal matrix for generic $N$, where RESULTS.md says plainly
+that no convergence proof is known for SSJ. It also has no denominators, so
+exact degeneracy is not a special case, and it needs no near-diagonality
+because $N$ is *chosen* rather than read off $A$.
+
+It loses anyway, and not narrowly. `experiments_flows.py`, cost in
+matmul-equivalents (QR charged 0.67, Cholesky 0.17):
+
+| | well-separated | | GOE | |
+|---|---|---|---|---|
+| | matmul-eq | off/‖A‖ | matmul-eq | off/‖A‖ |
+| **SSJ** | **48** | converged | **35** | converged |
+| QR flow (unshifted) | 332 | converged | 6,680 | 1.2e-4 |
+| Cholesky-LR | 466 | converged | 4,680 | 2.1e-7 |
+| Brockett, fixed $N$ | 3,412 | 2.9e-2 | 16,156 | 7.3e-3 |
+| Brockett, $N = \mathrm{diag}(A)$ | 16,162 | 1.3e-2 | 16,159 | 6.8e-3 |
+
+A Brockett step and an SSJ sweep cost the *same* (1 QR + 2 gemms), so the
+honest comparison is step counts. Run out to 8,000 steps on a GOE matrix,
+Brockett reaches 8.6e-4 and is contracting by **0.999707 per step** — steady,
+monotone, no stalling, exactly what the theorem promises — which extrapolates
+to **~70,000 further steps** for 1e-12. Against SSJ's **13**. Call it 6,000×.
+
+**A mechanism I proposed and then had to discard.** The natural explanation is
+that the double bracket's local rate goes like the *product* of the weight gap
+and the eigenvalue gap, so a small eigenvalue gap should cripple it. Measured,
+it does not: planting a single small gap and sweeping it over
+$1 \to 10^{-3}$ leaves Brockett's progress after 600 steps flat at
+$\approx 2\times10^{-2}$ throughout, while SSJ stays at 13–14 sweeps. So the
+slowness is not min-gap sensitivity, and I have not identified what it *is*.
+The measurement stands; the story I had for it did not survive contact.
+
+Two things worth keeping from this:
+
+* **The divide-by-gap nonlinearity is where SSJ's speed lives.** It is the one
+  thing that changes between these two maps, and it is worth three to four
+  orders of magnitude. The arctan saturation that looks like a safety device
+  is what makes dividing by a vanishing gap survivable — the price of the
+  fast generator, not a decoration on it.
+* **Cholesky-LR is the best of the losers**, and beats the QR flow per unit
+  cost on GOE (4,680 matmul-eq to 2.1e-7, against 6,680 to 1.2e-4), because
+  $n^3/3$ per step is a quarter of QR's $4n^3/3$. Still ~10× worse than SSJ.
+
+Do not retry the Brockett/Chu/Helmke–Moore gradient-flow family for speed. It
+is the right answer to a different question — it is the one map here that comes
+with a proof — and the proof costs about four orders of magnitude.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
@@ -1280,7 +1353,9 @@ from 49/120 to 32/120 **while adding regressions**.
 | all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |
 | dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
 
-Dead ends worth not retrying, all measured rather than assumed: Anderson
+Dead ends worth not retrying, all measured rather than assumed: isospectral
+gradient flows (Brockett double bracket, ~6,000x SSJ's step count; QR and
+Cholesky-LR flows 7-10x, section above); Anderson
 acceleration on IPT (no basin extension at any depth); Jacobi–Davidson, both
 diagonal-projected and inner-PCG variants (no improvement or strictly worse
 total cost than plain Davidson); LOBPCG/block-Davidson on the $k$-eigenpair

@@ -217,6 +217,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `bench_screen.py` — how well the one-hop screen predicts convergence (badly)
 - `bench_riccati.py` — the Brillouin-Wigner map head-to-head against IPT
 - `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
+- `experiments_flows.py` — isospectral gradient flows (Brockett, LR, QR): a closed family
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
 - `RESULTS.md` — original measured results (Julia reference implementation)
