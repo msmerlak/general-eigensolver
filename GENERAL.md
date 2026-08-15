@@ -1167,6 +1167,103 @@ actually captures the dominant coupling (measured ~60× basin widening there);
 Davidson with a genuinely better $M$ in place of the diagonal, rather than a
 better starting vector, is the untried combination this points to next.
 
+---
+
+# Other nonlinear maps with eigenvectors as fixed points
+
+An earlier pass tried seven rewritings of $Av = \lambda v$ (damping, Aitken,
+scalar self-energy, Richardson, Davidson, Rayleigh-quotient $\lambda$) and
+found nothing that beat IPT. In hindsight they were all the *same* structural
+idea — a diagonally-preconditioned residual correction — differing only in
+damping or in how $\lambda$ was estimated. The thing that was missing was a
+different reading of the equation itself.
+
+## The Riccati reading
+
+Pin the target coordinate ($v_j = 1$) and let $x$ be the tail on
+$C = \{i \ne j\}$. The eigenproblem is then **exact**, with nothing truncated:
+
+$$\lambda(x) = a_{jj} + w^\top x, \qquad R(x) = a_{Cj} + A_{CC}x - \lambda(x)\,x = 0$$
+
+an algebraic Riccati equation. Expanding a step is also exact:
+
+$$R(x + \delta) = R + J\delta - (w^\top\delta)\,\delta, \qquad J = A_{CC} - \lambda I - x w^\top$$
+
+So $R$ is a genuine **quadratic** in $\delta$. IPT is the fixed point that
+keeps only $\mathrm{diag}(A_{CC})$ and discards *both* the rank-one term
+$xw^\top$ and the quadratic term. Each is a different map, and — this is the
+useful part — **neither costs an extra matvec to restore**, because with
+$A_{CC}$ replaced by its diagonal, $J$ is diagonal-plus-rank-one and inverts
+by Sherman–Morrison in $O(n)$.
+
+Four maps come out of this, all at IPT's cost:
+
+| map | what it restores | result |
+|---|---|---|
+| `riccati_newton` | rank-one term | modest gain |
+| `riccati_cheby` | third-order (exact $R''$) correction | no better than Newton |
+| **`riccati_bw`** | **both — solves the local quadratic exactly** | **the winner** |
+| `grad_flow` | nothing (Rayleigh gradient ascent) | 0/11, structurally wrong |
+
+## Why the winner works, and it is a known idea
+
+Setting $R(x+\delta) = 0$ with $s = w^\top\delta$ gives $(J - sI)\delta = -R$,
+and $J - sI$ is *still* diagonal-plus-rank-one, so each candidate $s$ costs
+one $O(n)$ apply and no matvec. The scalar equation $s = w^\top\delta(s)$ is
+solved by a few damped steps.
+
+And $s$ is exactly the eigenvalue increment $\lambda(x+\delta) - \lambda(x)$.
+So the denominators $d_i - (\lambda + s)$ use the **updated** eigenvalue: this
+is self-consistent **Brillouin–Wigner** perturbation theory, where IPT is the
+Rayleigh–Schrödinger form. That is not a new idea in physics; what is new here
+is that it costs nothing extra, because the normalization term that makes it
+self-consistent is exactly the rank-one term Sherman–Morrison absorbs.
+
+It also predicts *where* it helps. IPT divides by $d_i - \lambda$ with
+$\lambda$ frozen, so a level sitting on top of the target is a pole.
+Brillouin–Wigner lets $\lambda$ move off it first — level repulsion is built
+into the denominator.
+
+## Measured
+
+240 instances (4 families × 5 couplings × 4 seeds × $n \in \{120,200,300\}$),
+against this repository's own `ipt_eig_partial`, eigenvalue **and** residual
+both checked against dense ground truth. `bench_riccati.py`:
+
+| | solved / 240 |
+|---|---|
+| `ipt_eig_partial` | 70 |
+| **`bw_eig_partial`** | **106** |
+| union of the two | 108 |
+| BW fails where IPT succeeds | **2** |
+
+By family (IPT → BW): symmetric 18 → 28, degenerate 8 → 19, graded 25 → 35,
+nonsymmetric 19 → 24. The degenerate row confirms the mechanism. Where both
+converge the median iteration ratio is **1.00** — the gain is free.
+
+**It is not a strict superset, and finding that out took a second sweep.** The
+first, at a single size, showed zero regressions; a sweep at another size found
+two. The scalar equation has several roots and the damped iterate can settle on
+one whose denominators have crossed a level. A caller who must never regress
+should try IPT on BW's failures — that recovers both cases and costs one cheap
+run. Clamping $s$ to stay short of the nearest level is *not* the fix: it also
+blocks the level repulsion the method depends on, and measured, it dropped BW
+from 49/120 to 32/120 **while adding regressions**.
+
+## Where it belongs, since iteration count is not wall time
+
+* **Dense is its home.** The matvec is $O(n^2k)$, so the extra $O(nk)$ work
+  amortizes: 1.31× of IPT at $n=800$, **0.93× (faster) at $n=1500$**.
+* **Sparse is not.** The matvec is only $O(\mathrm{nnz})$, so the inner loop —
+  about 24 $n \times k$ passes against the matvec's ~8 at $\mathrm{nnz}=8n$ —
+  dominates: **2.8–6.9× slower** than IPT even when both converge.
+* And it does **not** extend the sparse basin: on the `bench_sparse.py` family
+  it fails at exactly the same coupling as IPT (converges at $\rho=0.037$,
+  diverges at $0.073$). That failure is many-path accumulation, not a single
+  small denominator, and Brillouin–Wigner only repairs the latter — blocks
+  repair the former. The two are complementary, and the sparse recommendation
+  is unchanged: keep IPT, escalate to blocks.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
@@ -1177,6 +1274,7 @@ better starting vector, is the untried combination this points to next.
 | $k$ eigenpairs, interior, near-diagonal columns | `ipt_eig_partial` | ARPACK shift-invert | 4–123× |
 | $k$ eigenpairs, arbitrary input | `eig_partial` | ARPACK (never worse) | 6.4–9.1× when it qualifies |
 | single eigenpair, wider basin | `davidson_eig` | `ipt_eig_partial` | 16× basin, faster inside it |
+| $k$ eigenpairs, DENSE, near-degenerate | `bw_eig_partial` | `ipt_eig_partial` | 70 → 106 of 240, same iteration count |
 | single eigenpair, resonant/lattice | `block_ipt_eig`, `adaptive_block_ipt_eig` | plain IPT | up to 100× basin |
 | single eigenpair, band/block-dominant | `gipt_eig(mode="inverse")` | plain IPT | ~60× basin |
 | all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |

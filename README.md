@@ -106,6 +106,19 @@ counterintuitive details (a *larger* block cap is worse; block IPT is 150×
 slower than plain IPT when plain IPT would have worked; failure must be made
 cheap or escalating is a net loss) are measured in [GENERAL.md](GENERAL.md).
 
+**A different map, for dense input.** Writing the eigenproblem with the target
+coordinate pinned makes it an algebraic *Riccati* equation whose step expansion
+is exactly quadratic — and IPT turns out to be the fixed point that discards
+both the rank-one and the quadratic term. Restoring them costs **no extra
+matvec** (the Jacobian is diagonal-plus-rank-one, so Sherman–Morrison inverts
+it in O(n)), and the resulting map is self-consistent Brillouin–Wigner: the
+denominators use the *updated* eigenvalue, so a level sitting on top of the
+target is no longer a pole. `bw_eig_partial` solves **106 of 240** random
+instances against `ipt_eig_partial`'s **70**, at the same iteration count
+(`bench_riccati.py`). It is not a strict superset — 2 of 240 go the other way —
+and it is the wrong tool on sparse input, where the matvec is too cheap to
+amortize its O(nk) inner loop. See [GENERAL.md](GENERAL.md).
+
 `window_eig(A, lo, hi)` computes ALL eigenpairs in an interval via
 purification (matmul only, no factorization, no target guess) with a
 *certified* count — unlike ARPACK shift-invert, which needs `k` guessed up
@@ -202,6 +215,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `bench_vs_lapack.py` — head-to-head against LAPACK
 - `bench_sparse.py` — the large-sparse win, and `--envelope` for its boundaries
 - `bench_screen.py` — how well the one-hop screen predicts convergence (badly)
+- `bench_riccati.py` — the Brillouin-Wigner map head-to-head against IPT
 - `experiments_general.py` — the nonsymmetric explorations behind GENERAL.md
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
