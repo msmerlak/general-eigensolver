@@ -1403,6 +1403,83 @@ The gradient-flow family remains the right answer to a different question — it
 is the one map here that comes with a convergence proof — and the proof still
 costs between two and three orders of magnitude after its best acceleration.
 
+---
+
+# Path following: not a fixed point at all
+
+Every map above is a fixed-point iteration on a *fixed* matrix, and they all
+hit the same recorded wall: IPT's map is defined by A's own diagonal split, so
+its rate $\rho(A)$ is a property of the matrix, **independent of the starting
+iterate** — a warm start cannot rescue a divergent map, the basis must
+actually change. That closes off initialization as a remedy. But it also says
+what would work: change the *matrix* gradually and refresh the basis as you go.
+
+Walk $A(t) = D + tW$ from $t=0$, where the eigenvectors are the identity and
+the problem is free, to $t=1$. At each step re-express in the current basis,
+$B = V^\top A(t) V$. If $V$ diagonalizes $A(t-dt)$ then **$B$ is near-diagonal
+by construction**, so IPT runs inside its basin whatever the coupling of the
+original $A$. The basin condition stops being a property of the matrix and
+becomes a condition on the *step size* — and the step size is controlled by
+$\rho(B)$ itself, the same $O(n^2)$ indicator used everywhere else here. One
+parameter, and it is the basin criterion.
+
+Structurally this is not a fixed-point iteration: it is a predictor–corrector
+path in matrix space whose fixed points exist only at $t=1$. Which is exactly
+why it goes where the others cannot. `experiments_homotopy.py`:
+
+| case | $\rho(A)$ | steps | gemm-eq | error | SSJ | ratio |
+|---|---|---|---|---|---|---|
+| near-diagonal, coupling 0.5 | 201 | 20 | 549 | 8.9e-12 | 21 | 26× |
+| near-diagonal, coupling 5 | 2,013 | 96 | 3,170 | 4.8e-12 | 37 | 85× |
+| near-diagonal, coupling 50 | 20,134 | 245 | 7,485 | 2.2e-12 | 51 | 148× |
+| GOE (no diagonal structure at all) | 8,404 | 319 | 13,228 | 4.9e-14 | 53 | 248× |
+| **exact degeneracy** | 6,711 | — | — | **NaN** | 155 | — |
+
+It works: **plain IPT diverges on every one of these**, and the continuation
+solves $\rho = 20{,}000$ and a GOE matrix — which has no diagonal structure
+whatever — to 1e-12 or better. Step count grows like $\sqrt{\rho}$, not
+linearly, which is better than the obvious estimate.
+
+And it loses anyway, by 26–248×, to SSJ — which globalizes IPT already, and is
+what `ssj_ipt_eigh` has been doing all along. It is a more expensive solution
+to a solved problem.
+
+## Two things it taught that were not obvious
+
+**A loose corrector destroys it.** The natural economy is to solve the
+intermediate steps sloppily and only demand accuracy at $t=1$. Measured, that
+does not merely cost accuracy — it *breaks the method*: with an intermediate
+tolerance of 1e-4 the run hits the step limit and returns NaN, against 15
+steps and 7.7e-12 when every corrector is run to 1e-13. The basis quality is
+not a by-product of the method, it *is* the method: a slightly wrong $V$ makes
+$B$ less near-diagonal, which shrinks the admissible step, which needs more
+steps, each of which is also sloppy. Fidelity at every step is what buys the
+large steps.
+
+**The conservative gate is the wrong instinct.** The dispatcher elsewhere in
+this repository gates IPT at $\rho \le 0.1$, and carrying that instinct over
+costs 3.4×: gate 0.05 needs 155 steps and 1,853 gemm-equivalents where gate
+1.0 needs 20 and 549. The reason the two differ is that a wrong gate here is
+*cheap* — the step is simply retried at half the size — whereas in the
+dispatcher a wrong gate wastes a whole solver run. Same indicator, opposite
+tuning, because the cost of being wrong is different. (That is the same lesson
+as `_auto_gate` in dispatch.py, arrived at from the other side.)
+
+## And the sharpest finding is the failure
+
+The degenerate row is not a bug, it is the mechanism. The homotopy keeps the
+denominators $d_i - d_j$ **small**, but it cannot make them **nonzero**: at an
+exact degeneracy the gap is zero at every step size, so no amount of path
+refinement helps. SSJ handles the same matrix natively in 58 sweeps, because
+its arctan *saturates* at $\pm\pi/4$ when the gap vanishes.
+
+So this experiment re-derives, from a completely different direction, the same
+conclusion the Brockett experiment reached: **SSJ's speed is the divide-by-gap
+generator and its robustness is the saturation on that division**, and the two
+are one mechanism, not a fast idea plus a safety device. Two independent
+attempts to do without it — one replacing the division (gradient flow), one
+avoiding the need for it (continuation) — both land back on it.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
@@ -1419,7 +1496,10 @@ costs between two and three orders of magnitude after its best acceleration.
 | all eigenpairs in an interval, unknown count | `window_eig` | ARPACK (correctness, not speed) | exact count vs silent misses |
 | dense non-normal, no structure | `sdc_eigvals` | nothing else here solves it | 1e-13, 0.13–0.22× `dgeev` |
 
-Dead ends worth not retrying, all measured rather than assumed: isospectral
+Dead ends worth not retrying, all measured rather than assumed: homotopy
+continuation with basis refresh (globally convergent, solves rho = 20,000 and
+GOE where every fixed-point map here fails, but 26-248x SSJ and NaN on exact
+degeneracy); isospectral
 gradient flows (Brockett double bracket -- momentum accelerates it 26x and is
 the one thing that does, but it stays ~800x SSJ; QR and Cholesky-LR flows
 7-10x, section above); Anderson
