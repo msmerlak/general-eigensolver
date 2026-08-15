@@ -208,6 +208,78 @@ def _power_iter_norm_antisym(K, v0=None, iters: int = 25):
     return float(np.sqrt(est)), v
 
 
+_BLOCK_NS_FLOOR = 0.1  # Newton-Schulz target floor, as a fraction of tol
+
+
+def _ns_target(target: float, block_m: int, tol: float) -> float:
+    """Newton-Schulz orthogonality target, floored when SSJ-BC is active.
+
+    The plain targets (rel_off^2, or gemm_ns_factor * rel_off) are calibrated
+    for the gradual quadratic tail of the unpreconditioned map. With a block
+    pass the error can fall four to six orders in ONE sweep, so the target is
+    no longer below the NEXT error and the leftover orthogonality defect
+    survives into the answer -- silently costing 2-3 digits. An acceleration
+    can break a downstream tolerance; this floors it at a fraction of tol.
+    """
+    return min(target, _BLOCK_NS_FLOOR * tol) if block_m else target
+
+
+def _block_pass(B, X, m: int, offset: int):
+    """One exact block-Jacobi pass on sorted-contiguous diagonal blocks of B.
+
+    Sorts diag(B), cuts it into blocks of size m, diagonalizes each block
+    exactly with a small dense eigensolve, and applies the block-diagonal
+    orthogonal factor to both X and B. Returns (B, X) in the permuted basis --
+    the whole SSJ map is permutation-equivariant, so the permutation is
+    carried forward rather than undone.
+
+    Why it helps: diag(B) starts at spread ||A||/sqrt(n) and has to climb to
+    the true spectral spread, which costs ~(1/2)log n sweeps. While the spread
+    is small nearly every gap is comparable to every coupling, so a large
+    fraction of pairs saturate at +-pi/4 at once (7697 of them at n=400) and
+    the contraction rate sits at 0.99. An exact block solve hands the
+    iteration ~sqrt(m) of that spread immediately.
+
+    Monotone for ANY grouping: for block-diagonal orthogonal P, the (I,J)
+    block of P^H B P is Q_I^H B_IJ Q_J, whose Frobenius norm equals
+    ||B_IJ||_F. Off-block masses are preserved individually while the
+    within-block off-diagonal mass is zeroed, so off(B) can only fall.
+
+    The sorted diagonal is rolled cyclically by `offset` instead of being cut
+    into a ragged head and tail, so every block has size exactly m and ONE
+    batched eigh replaces a Python loop over n/m small ones -- the loop is
+    latency-bound on GPU. Trailing indices past the last full block are left
+    for the next pass, which has a different offset.
+    """
+    xp = _am(B)
+    n = B.shape[0]
+    nb = n // m
+    if nb < 2:
+        return B, X
+    keep = nb * m
+
+    p = xp.argsort(xp.real(xp.diag(B)))
+    if offset:
+        p = xp.roll(p, -int(offset))
+    B = B[p][:, p]
+    X = X[:, p]
+
+    idx = xp.arange(nb)
+    blocks = B[:keep, :keep].reshape(nb, m, nb, m)[idx, :, idx, :]
+    blocks = (blocks + blocks.conj().transpose(0, 2, 1)) / 2.0
+    Q = xp.linalg.eigh(blocks)[1]  # batched over the leading axis
+
+    # Assemble the block-diagonal factor once so applying it is two gemms
+    # rather than 2*nb small ones.
+    Qfull = xp.zeros((keep, keep), dtype=B.dtype)
+    Qfull.reshape(nb, m, nb, m)[idx, :, idx, :] = Q
+
+    X[:, :keep] = X[:, :keep] @ Qfull
+    B[:, :keep] = B[:, :keep] @ Qfull
+    B[:keep, :] = Qfull.conj().T @ B[:keep, :]
+    return (B + B.conj().T) / 2.0, X
+
+
 def ssj_eigh(
     A: np.ndarray,
     tol: float = 1e-13,
@@ -221,6 +293,9 @@ def ssj_eigh(
     precision: str = "full",
     mixed_switch: float = 1e-4,
     prologue: int = 0,
+    block_m: int = 0,
+    block_passes: int = 2,
+    block_until: float = 0.0,
 ):
     """Eigendecomposition of a real symmetric or complex Hermitian matrix by
     Simultaneous Saturated Jacobi sweeps.
@@ -267,6 +342,27 @@ def ssj_eigh(
         count for graded / rapidly decaying spectra (measured: 45 -> 5 sweeps
         with prologue=3 on spectrum 2^-i) and do nothing for flat spectra
         like GOE. Each step costs about one sweep. Ignored when X0 is given.
+    block_m : block size for the block-cluster preconditioner (SSJ-BC).
+        0 (default) disables it. Each sweep first runs `block_passes` exact
+        block-Jacobi passes over sorted-contiguous blocks of diag(B), which
+        collapses the saturated-pair population the plain map has to grind
+        through. This is a preconditioner AROUND the map, not a change to it:
+        the generator, the arctan saturation and the symmetric pairing are
+        untouched. Measured sweep counts (GOE, method="auto"): 20/24/29 at
+        n=200/400/800 falling to 9/11/14 at block_m=32, 69 -> 25 on exact
+        5-fold degeneracy and 33 -> 9 on a 1e-9 cluster. It costs a batched
+        eigh and two gemms per pass, so a sweep is dearer -- the sweep ratio
+        is not a wall-time ratio.
+    block_passes : block passes per sweep when block_m > 0. Consecutive passes
+        alternate the block boundaries by block_m // 2 so pairs split across a
+        boundary are caught by the next pass.
+    block_until : stop running block passes once off(B)/||A||_2 falls below
+        this. Default 0.0 (never stop), which measured strictly best: gating
+        at 1e-3 costs sweeps on exactly the spectra the preconditioner exists
+        for (5-fold degeneracy 25 -> 38, 1e-9 cluster 9 -> 12) and buys
+        nothing back, because the warm-start regression such a gate would
+        protect against does not occur here -- a tight X0 measures 2 sweeps
+        with and without block passes. Kept as a knob, not a default.
 
     Returns
     -------
@@ -289,14 +385,16 @@ def ssj_eigh(
             gemm_cap=gemm_cap, gemm_ns_factor=gemm_ns_factor,
             return_info=True,
             X0=None if X0 is None else xp.asarray(X0).astype(low_dt),
-            prologue=prologue,
+            prologue=prologue, block_m=block_m, block_passes=block_passes,
+            block_until=block_until,
         )
         full_dt = np.complex128 if A.dtype.kind == "c" else np.float64
         w, V, info = ssj_eigh(
             A.astype(full_dt), tol=tol, method=method,
             max_sweeps=max_sweeps, ns_switch=ns_switch, gemm_cap=gemm_cap,
             gemm_ns_factor=gemm_ns_factor, return_info=True,
-            X0=V_low.astype(full_dt),
+            X0=V_low.astype(full_dt), block_m=block_m,
+            block_passes=block_passes, block_until=block_until,
         )
         if return_info:
             info["sweeps_low"] = info_low["sweeps"]
@@ -309,6 +407,9 @@ def ssj_eigh(
         raise ValueError(f"unknown precision {precision!r}")
 
     n = A.shape[0]
+    # Never let a "block" be the whole problem: at block_m >= n the pass would
+    # just be a call to the dense eigensolver, which is not what SSJ is.
+    block_m = min(block_m, n // 2)
     norm_A = _spectral_norm_estimate(A)
     if norm_A == 0.0:  # zero matrix
         w = xp.zeros(n)
@@ -346,6 +447,17 @@ def ssj_eigh(
             converged = True
             break
 
+        if block_m and rel_off > block_until:
+            for r in range(block_passes):
+                B, X = _block_pass(
+                    B, X, block_m, 0 if (sweeps + r) % 2 == 0 else block_m // 2)
+            rel_blk = off_frobenius(B) / norm_A
+            if rel_blk <= tol:
+                converged = True
+                history.append(rel_blk)
+                sweeps += 1
+                break
+
         K = _angles(B)
         Y = X @ (eye + K)  # = X + X @ K
 
@@ -368,7 +480,8 @@ def ssj_eigh(
                 # ~2 extra gemms per endgame sweep -- still well below a QR
                 # factorization; the stagnation guard floors an unreachably
                 # tight target at roundoff.
-                X, _ = _orth_ns_adaptive(Y, target=rel_off * rel_off)
+                X, _ = _orth_ns_adaptive(Y, target=_ns_target(
+                    rel_off * rel_off, block_m, tol))
             else:
                 X = _orth_qr(Y) if method == "auto" else _orth_cholqr2(Y)
         elif method == "gemm":
@@ -386,7 +499,8 @@ def ssj_eigh(
             sigma_c = min(sigma, gemm_cap)
             if sigma_c > 0.1:
                 Y = Y / (1.0 + sigma_c * sigma_c) ** 0.25
-            X, ns_gemms = _orth_ns_adaptive(Y, target=gemm_ns_factor * rel_off)
+            X, ns_gemms = _orth_ns_adaptive(Y, target=_ns_target(
+                gemm_ns_factor * rel_off, block_m, tol))
             gemms += ns_gemms
         else:
             raise ValueError(f"unknown method {method!r}")

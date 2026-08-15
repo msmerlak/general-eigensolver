@@ -133,6 +133,7 @@ the tail-exclusion path fires.
 | # | attempt | verdict |
 |---|---|---|
 | 1 | **SSJ-BC**: block-cluster preconditioner (block-Jacobi pass on sorted-diagonal blocks) + mass-capped angle gate + Newton–Schulz target floor | **real, verified independently — the first genuine improvement.** See below. |
+| 2 | **Integrate SSJ-BC into `src/ssj/core.py`** behind `block_m`, default off; batched block pass; test the `block_until` gate | **shipped.** Sweep gains reproduce exactly. Two inherited claims did *not* survive re-measurement — see below. |
 
 ### 1. SSJ-BC — verified
 
@@ -188,3 +189,76 @@ the map. The generator, the arctan saturation and the symmetric pairing are
 imported unmodified. With m ∝ n it is "SSJ preconditioned by one level of
 block-Jacobi", which the agent says plainly and which should not be described
 as "SSJ got faster". And SSJ remains 24–29× LAPACK even with it.
+
+### 2. SSJ-BC integrated — and two inherited claims that did not survive
+
+Shipped in `ssj_eigh` as `block_m` (0 = off, unchanged default), with
+`block_passes=2` and `block_until=0.0`. `test_default_is_unchanged` asserts
+`block_m=0` reproduces the untouched iteration bit for bit. 131 tests pass
+(19 new, in `tests/test_block_cluster.py`).
+
+**The block pass was rewritten, not ported.** The prototype loops over blocks
+in Python, issuing `n/m` small eigensolves and `2n/m` small gemms — latency-
+bound, and badly so on GPU. The shipped version rolls the sorted diagonal
+cyclically by `offset` instead of cutting a ragged head and tail, so every
+block has size exactly `m`, **one batched `eigh`** handles all of them, and
+the block-diagonal factor is assembled once so applying it is two gemms.
+Because it is a rewrite, none of attempt #1's numbers were inheritable; all
+were re-measured.
+
+Sweep counts (`method="auto"`, GOE seed 1), against attempt #1's independently
+verified column:
+
+| case | shipped default | integrated BC m=32 | attempt #1 verified |
+|---|---|---|---|
+| GOE n=200 | 20 | **9** | 9 |
+| GOE n=400 | 24 | **11** | 11 |
+| GOE n=800 | 29 | **14** | 14 |
+| exact 5-fold deg n=200 | 69 | **25** | 25 |
+| exact 5-fold deg n=500 | 74 | **31** | — |
+| clustered 1e-9 n=200 | 33 | **9** | 9 |
+| zero diagonal n=200 | 21 | **9** | — |
+
+An exact match on every case attempt #1 covered. Accuracy holds throughout:
+|Δλ|/‖A‖ ≤ 6e-15, residual ≤ 4.5e-14, orthogonality ≤ 2.9e-14. Also verified
+on `gemm` (25 → 10), `cholqr2`, `mixed` precision, and complex Hermitian.
+
+**Claim that did not reproduce — the warm-start regression.** Attempt #1
+records "a tight `X0` warm start regresses 2 → 3 sweeps", and that single fact
+is why it was left unintegrated. It does not happen here. Measured, with
+`X0` = the exact eigenbasis of a nearby matrix:
+
+| perturbation | default | BC gated | BC ungated |
+|---|---|---|---|
+| ε=1e-6, n=200 | 2 | 2 | 2 |
+| ε=1e-4, n=200 | 3 | **2** | **2** |
+| ε=1e-6, n=400 | 2 | 2 | 2 |
+| ε=1e-2, n=400 | 5 | **3** | **3** |
+
+BC does not regress the warm start — it *improves* it, and gating changes
+nothing. Whether the difference is the batched partitioning or the prototype's
+`part="gap"` default is not established; what is established is that the
+blocker is absent from the shipped implementation.
+
+**Consequence: `block_until` defaults to 0.0, not the 1e-3 I first wrote.**
+I added the gate to protect against the regression above, then measured what
+it costs. It is a pure loss:
+
+| case | gate 0.0 | gate 1e-6 | gate 1e-3 |
+|---|---|---|---|
+| exact 5-fold deg n=200 | **25** | 25 | 38 |
+| exact 5-fold deg n=500 | **31** | 38 | 51 |
+| clustered 1e-9 n=200 | **9** | 9 | 12 |
+| GOE n=400 | **11** | 11 | 12 |
+
+The gate switches the preconditioner off precisely on the spectra it exists
+for — tight clusters are still being resolved well below rel_off 1e-3. Kept as
+a knob, defaulted off. **Had I shipped the default I reasoned my way to rather
+than the one I measured, degenerate spectra would have lost a third of the
+gain silently** — the same shape of error as attempt #1's untested defaults.
+
+**Not yet measured: wall time.** The batched rewrite changes the constant, so
+attempt #1's 1.21–1.46× does not carry over, and the box was at load 1.96 when
+this entry was written. Sweeps above are load-immune and stand; the wall
+figure is owed. Note the sweep ratio is *not* a wall ratio — a BC sweep buys a
+batched `eigh` and two extra gemms.
