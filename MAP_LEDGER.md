@@ -51,6 +51,7 @@ Incumbents to beat, by regime:
 | 30 | randomized range finder + IPT | sketch | fails — gives a subspace, IPT needs a frame |
 | 31 | Perron balancing of the gap-weighted coupling graph | positive diagonal; fixed point is a Perron ray | **no-go, proved and verified** — 0 of 15 basin cases changed; ρ(J) is exactly invariant under diagonal similarity (8.5e-16), so no reconditioning can move the basin. By-product screen ρ(\|J\|) is a better classifier (AUC 0.988 vs 0.944) but costs more than the solve it screens |
 | 32 | inertia-certified Laguerre on the log-det jet | banded LDL^T carried as a 2nd-order Taylor jet in σ; one pass gives ν (Sylvester) + tr R + tr R²; no gap denominator anywhere | **loses as an eigensolver** — 25–147× flops, 317–1149× wall vs ARPACK shift-invert, which amortizes ONE factorization over all k while this refactorizes at every shift. **Narrow win**: certified window count 2.0–14.0× over `window_count` (#20), crossover N≈250, banded-only, and the certificate is exact on generic shifts but wrong 23/200 with \|Δν\| up to **248** for shifts within 1e-13…1e-9 of an eigenvalue |
+| 33 | stochastic moment measure (SLQ / KPM quadrature of the spectral measure) | a random *measure* carried as scalars; state is shift-independent; fixed point is the spectral measure itself | **loses** — 334× flops / 9,700× wall vs `eigvalsh`, 2,660× flops vs #32, on exact counting. Two floors multiply: resolution **bias** ≈ n/degree (probes cannot touch it) and Hutchinson variance ≈ 90r probes. Exactness needs degree ≳ n — the same order as diagonalizing. Shift-independence is real but amortizes a per-boundary cost that was already ~1e-2 gemm-equiv |
 
 ## Recurring lesson
 
@@ -86,3 +87,13 @@ on ARPACK's home ground with a handicap.
 A fourth, also from #32: **a completeness certificate protects the count, not
 the value.** It can be perfectly self-consistent around a wrong answer. Do not
 accept "the certificate agrees" as evidence of accuracy.
+
+A fifth, from #33, and the exact **dual of the third**: an $LDL^\top$ buys an
+exact integer count in $O(nb^2)$ with no dependence on the boundary gap, while
+every matvec-only route pays $\Theta(n)$ polynomial degree for that same
+integer — verified here independently, with the variance channel removed, the
+count error falls only with degree and needs $\sim\!2n$–$4n$ to go below 0.5.
+So **exact counting is where factorization is structurally unbeatable**, exactly
+as being factorization-free is what wins for sparse interior eigenpairs. The
+two lessons bracket the regime: match the tool to which of the two questions is
+being asked, because no single mechanism wins both.

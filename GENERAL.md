@@ -1831,6 +1831,76 @@ in `window_eig`, whose selling point over ARPACK is a *certified count*; that
 certificate is equally silent about the accuracy of the eigenpairs it counts,
 and the tests assert residuals separately for precisely that reason.
 
+---
+
+# A random measure as the state, and the dual of the factorization lesson
+
+Nothing else in this repository is stochastic. Take the state to be a **random
+measure** carried as scalars — Rademacher probes $z_p$, Lanczos tridiagonals
+$T_m$ (whose $(\alpha,\beta)$ *are* the continued-fraction coefficients of
+$z^\top(zI-A)^{-1}z$), or equivalently Chebyshev moments
+$c_k = \frac1s\sum_p z_p^\top T_k(\hat A) z_p$:
+
+$$\hat\mu = \frac1s\sum_p\sum_j \tau_j^{(p)}\,\delta_{\theta_j^{(p)}},
+\qquad \mathbb{E}[\hat\mu] \to \tfrac1n\textstyle\sum_i \delta_{\lambda_i}$$
+
+The fixed point is the spectral measure itself; eigenvalues are its atoms;
+there is no vector iteration anywhere. Its one structural attraction is that
+the state is **shift-independent**: one sweep answers "how many eigenvalues in
+$[a,b]$" for *every* $(a,b)$ at $O(sm)$ per query and zero further matvecs,
+where #20 pays a purification pair and #32 an $LDL^\top$ per boundary.
+
+It loses by **334× in flops and 9,700× in wall time** against `eigvalsh`, and
+by **2,660× in flops** against #32, on exact counting. Two floors multiply:
+
+* **Resolution — bias, not noise.** The measure resolves the counting function
+  only to width $\Delta\lambda \approx W/\text{degree}$, so the count error is
+  the number of eigenvalues within $\Delta\lambda$ of the boundary,
+  $\approx n/\text{degree}$. Boundaries sit in gaps of order the mean spacing
+  $W/n$, so integer exactness needs $\text{degree} \gtrsim n$ — **the same
+  order as diagonalizing**. Probing cannot touch this: raising $s$ from 16 to
+  256 changed the rms count error by under 2%.
+* **Variance.** With resolution error removed exactly, Hutchinson still needs
+  $s^\* \approx 90r$ probes, since $\mathrm{Var}(z^\top Pz)=2(r-\sum_i P_{ii}^2)$
+  grows with window rank.
+
+I verified the first floor independently, since it is the transferable claim.
+Removing the variance channel entirely (exact Chebyshev moments from the true
+spectrum, zero probes), the count error on 2D Anderson falls **only** with
+degree and needs $2n$–$4n$ to drop below 0.5:
+
+| $n$ | deg $=n/4$ | deg $=n$ | deg $=2n$ | deg $=4n$ |
+|---|---|---|---|---|
+| 144 | 0.54 | 0.29 | 0.11 | 0.01 |
+| 256 | 0.20 | 0.14 | 0.10 | 0.01 |
+| 400 | 0.64 | 0.13 | 0.21 | 0.02 |
+
+## The dual
+
+This is the wall #32 hit, approached from the opposite side, and together they
+bracket the regime:
+
+> An $LDL^\top$ buys an **exact integer** in $O(nb^2)$ with no dependence on the
+> boundary gap. Every matvec-only route pays $\Theta(n)$ degree for that same
+> integer.
+
+So **exact counting is where factorization is structurally unbeatable** —
+precisely the mirror of the lesson that being *factorization-free* is what wins
+sparse interior eigenpairs by 8–347×. No single mechanism wins both questions,
+and which tool is right depends on which question is being asked.
+
+The shift-independence is real and visible in the data (the candidate's cost is
+identical at 24 and 96 slices while both incumbents double) — it just amortizes
+a per-boundary cost that was already $\sim\!10^{-2}$ gemm-equivalents. There
+was nothing left to amortize.
+
+**The failure mode is silent incompleteness, not inaccuracy.** Used as the
+count inside a solver, an under-resolved sweep returned $\hat k = 7$ against a
+true 8: the seven eigenpairs it found were exact to 1.7e-16, and the eighth was
+simply gone. That is exactly what `window_eig` exists to prevent, so shipping
+this would *subtract* capability — and it is the same trap as the certificate
+lesson above, in a new costume.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
