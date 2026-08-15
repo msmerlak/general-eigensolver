@@ -206,3 +206,42 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} tests passed")
+
+
+def test_hybrid_composes_with_block_preconditioner():
+    """ssj_ipt_eigh(block_m=32): the globalizer (BC) and the manifold-free
+    endgame (IPT) compose. This exact combination once returned 1e-8
+    eigenvalue error, because the coarse globalizing blocks left the frame
+    orthonormal only to their own loose tolerance and IPT inherited the
+    defect as a similarity error. The hand-off now re-orthonormalizes, and
+    this pins full precision plus the fact that the hand-off actually fires.
+    """
+    import numpy as np
+    from ssj import ssj_ipt_eigh
+
+    r = np.random.default_rng(1)
+    M = r.standard_normal((400, 400))
+    A = (M + M.T) / np.sqrt(800)
+    w, V, info = ssj_ipt_eigh(A, block_m=32, return_info=True)
+    nrm = np.linalg.norm(A, 2)
+    assert info["path"] == "hybrid"          # the gate opened
+    assert info["sweeps"] <= 12              # BC did the globalizing
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-11
+
+
+def test_hybrid_falls_back_to_ssj_on_exact_ties():
+    """Exact degeneracy: rho is infinite, the gate must never open, and the
+    hybrid must finish as pure SSJ at full accuracy."""
+    import numpy as np
+    from ssj import ssj_ipt_eigh
+
+    r = np.random.default_rng(2)
+    Q, _ = np.linalg.qr(r.standard_normal((200, 200)))
+    vals = np.repeat(r.standard_normal(41), 5)[:200]
+    A = (Q * vals) @ Q.T
+    A = (A + A.T) / 2
+    w, V, info = ssj_ipt_eigh(A, block_m=32, return_info=True)
+    nrm = np.linalg.norm(A, 2)
+    assert info["path"] == "ssj"
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12

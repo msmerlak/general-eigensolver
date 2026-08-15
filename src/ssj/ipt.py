@@ -244,7 +244,8 @@ def ipt_rate(B, xp=None):
 
 def ssj_ipt_eigh(A, tol=1e-13, max_iter=200, ipt_gate=0.5,
                  ipt_probe_iters=60, method="auto", max_sweeps=1000,
-                 X0=None, precision="full", prologue=0, return_info=False):
+                 X0=None, precision="full", prologue=0, block_m=0,
+                 block_passes=2, return_info=False):
     """Globally convergent solver with a one-gemm-per-iteration endgame.
 
     Runs SSJ to globalize and hands off to IPT as soon as IPT's basin has been
@@ -262,6 +263,10 @@ def ssj_ipt_eigh(A, tol=1e-13, max_iter=200, ipt_gate=0.5,
         0.5 is conservative; IPT's true boundary is near 1.
     ipt_probe_iters : cap on IPT iterations after the hand-off (it falls back
         to finishing with SSJ if IPT still fails).
+    block_m, block_passes : forwarded to ssj_eigh -- the SSJ-BC block-cluster
+        preconditioner. BC is a globalizer (it hands the iterate ~sqrt(m) of
+        diagonal spread per pass), which is precisely the phase SSJ plays in
+        this hybrid, so the two compose: BC opens IPT's gate in fewer sweeps.
     """
     xp = _am(A)
     A = xp.asarray(A)
@@ -274,7 +279,11 @@ def ssj_ipt_eigh(A, tol=1e-13, max_iter=200, ipt_gate=0.5,
          else _orth_qr(xp.asarray(X0).astype(A.dtype)))
     sweeps = 0
     ipt_gemms = 0
-    ssj_kw = dict(method=method, precision=precision)
+    # The globalizing phase and the endgame have different economics: block
+    # passes (SSJ-BC) accelerate exactly the phase SSJ is being used for here,
+    # so they compose with the hand-off rather than competing with it.
+    ssj_kw = dict(method=method, precision=precision, block_m=block_m,
+                  block_passes=block_passes)
     # Coarse target for each globalizing block: SSJ only has to get close
     # enough for IPT's gate to open, not all the way to `tol`. Tightened
     # whenever a block converges with the gate still shut.
@@ -289,6 +298,17 @@ def ssj_ipt_eigh(A, tol=1e-13, max_iter=200, ipt_gate=0.5,
             break  # SSJ alone already finished it
 
         if ipt_rate(B, xp) < ipt_gate:
+            # Leaving the manifold requires leaving it CLEANLY. The coarse
+            # globalizing blocks run at tol=coarse, so their last retraction
+            # may leave X orthonormal only to ~coarse-level targets (with BC
+            # the error collapses through the gate in one sweep, and the
+            # Newton-Schulz floor was keyed to the coarse tol). IPT inherits
+            # the frame verbatim -- any defect here is baked into the answer
+            # as a similarity error (measured: 1e-7 eigenvalue error without
+            # this). One exact QR at the hand-off, once per solve, fixes it.
+            X = _orth_qr(X)
+            B = X.conj().T @ (A @ X)
+            B = (B + B.conj().T) / 2.0
             d = xp.real(xp.diag(B))
             W = B - xp.diag(xp.diag(B))
             Vd, Lam, iters, ok, err = _ipt_iterate(

@@ -4,6 +4,44 @@ A dedicated track, separate from `MAP_LEDGER.md`. That ledger hunts for *new
 maps*; this one improves the map the repository already ships. **Append here
 before anything else**, one line per attempt, negative results included.
 
+## What this is teaching us about the eigenvalue problem
+
+*(rewritten each tick; as of attempt #8)*
+
+**Fast eigensolvers divide by gaps.** Every method measured fast here takes
+steps of the form coupling/gap — Jacobi angles, IPT denominators, secular
+solves. Every method that doesn't (gradient/Brockett ~800×, homotopy, plain
+flows) is slow. Dividing by the gap is a Newton step in disguise: it uses
+curvature. Its price is that it explodes near resonance (gap → 0), so it only
+works inside a basin (ρ = max|W|/gap < 1) or behind a saturation.
+
+**The two-phase decomposition is the deep structure.** Every practical solver
+= a *globalization* phase that buys the basin + a *divide-by-gap endgame* that
+exploits it. LAPACK: tridiagonalization, then gap-divided secular/QL steps.
+SSJ: saturated sweeps, then the same sweeps acting quadratically. The phases
+have different economics and the mistake this repo's cost discussions kept
+making was pricing them as one thing.
+
+**What the manifold is actually for.** SSJ's orthogonality constraint (QR,
+49% of every sweep — attempt #5) is not decoration: both of its saturations
+are load-bearing (arctan on angles; polar on the composed step — Cayley's
+weaker saturation diverges at n=800, attempt #7). But the saturations are only
+*needed outside the basin*. IPT proves the endgame needs no manifold at all:
+pin v_jj = 1, iterate one gemm per step, done. So the manifold tax is a
+globalization cost being paid during the endgame too, where it buys nothing.
+
+**Corollary being tested now (attempt #8):** the right hybrid is
+globalize-cheaply-then-flee-the-manifold. The repo already ships the pieces —
+`ssj_ipt_eigh` (handoff gated on ρ < 0.5) and SSJ-BC (a globalizer: block
+passes hand the iterate √m of diagonal spread) — but they predate each other
+and have never been composed or measured together.
+
+**Deepest open question:** what is the *cheapest sufficient* globalization?
+The basin condition is ρ < 1, an O(n²) observable. SSJ buys it with O(n³)
+manifold sweeps; BC buys spread with batched small eigensolves. Whether
+something O(n²)-per-step can buy it (or whether the gate opens after just 2–3
+BC sweeps) decides how much of the n³ manifold work is actually necessary.
+
 ## What SSJ is, and where the cost sits
 
 ```
@@ -161,6 +199,7 @@ the tail-exclusion path fires.
 | 5 | **Profile the sweep body**; test whether the cheaper retraction wins | **cost model corrected (6.6× off); one hypothesis refuted, one real 1.60× win.** `method="gemm"` + BC is now the fastest configuration. |
 | 6 | **Rebuild `_angles` in place**; O(n log n) tie detection instead of O(n²) | **shipped, bit-identical.** 2.0–2.9× on the map itself, **1.04–1.09× end to end** — diluted by Amdahl. |
 | 7 | **Cheapen the retraction** (target #2, 49% of a sweep): Cayley transform; re-verify the Newton–Schulz comparison | **negative, and it invalidates a number in #5.** Cayley does not converge at n=800. QR is the cheapest verified retraction. |
+| 8 | **Compose the globalizer with the manifold-free endgame** (`ssj_ipt_eigh` + BC), and instrument where the basin opens | **shipped, with a real bug found by the output assert.** The basin opens as a *cliff*; hybrid+BC = 12 sweeps + 6 gemms at n=800. |
 
 ### 1. SSJ-BC — verified
 
@@ -620,3 +659,76 @@ cause: timing a numerical routine without checking it produced a right answer
 (#5's Newton–Schulz here; #3's flop model was a different error). A timing
 harness for anything iterative should assert on its output — a routine that
 fails fast looks exactly like a routine that is fast.
+
+### 8. The basin opens as a cliff — and the hybrid now composes with BC
+
+First tick under the reflection mandate. The seed hint (IPT is pure gemm
+because it has no manifold) points straight at the two-phase decomposition,
+and the repo already shipped both halves — `ssj_ipt_eigh` (hand off to IPT
+once ρ = max|W|/gap < 0.5) and SSJ-BC (a globalizer) — but they predate each
+other: the hybrid's `ssj_kw` could not pass `block_m`, so the two
+accelerations of this campaign had never met.
+
+**Instrumented first: where does the basin actually open?** ρ per sweep on
+the shipped code path:
+
+| case | ρ<1 at sweep | total sweeps | post-gate share |
+|---|---|---|---|
+| GOE n=400 plain | 18 | 23 | 17% |
+| GOE n=400 BC32 | 9 | 11 | 18% |
+| GOE n=800 plain | 24 | 29 | 17% |
+| GOE n=800 BC32 | 12 | 15 | 20% |
+
+Two findings. **The basin opens as a cliff, not a ramp**: ρ sits above 99 for
+most of the solve and collapses through 1 in a single sweep (BC at n=400:
+18.1 → 0.04 in one sweep). So the gate threshold barely matters — 0.5 and 1.0
+open on the same sweep — and there is no "partially open" regime to exploit.
+**And BC does not enlarge the post-gate share** (~17–20% with or without): it
+compresses both phases proportionally. The manifold-free endgame can only ever
+replace that last ~20% of sweeps; the pre-cliff globalization is where 80% of
+the cost lives, with the manifold genuinely load-bearing there (attempt #7).
+
+**The composition shipped, and the output assert caught a real bug.** With
+`block_m` threaded through, hybrid+BC first returned **1e-8 eigenvalue error**
+on GOE — the coarse globalizing blocks run at `tol=1e-2`, the Newton–Schulz
+floor keys off that coarse tol, and with BC the error falls through the gate
+in one sweep, so the frame arrives at the hand-off orthonormal only to ~1e-7.
+IPT inherits the frame verbatim and bakes the defect into the answer as a
+similarity error. Without BC this never fired (K is still large at the gate,
+so the last retraction was an exact QR) — a latent bug in the shipped hybrid,
+exposed by the composition. **The lesson, stated as mechanism: leaving the
+manifold is fine; leaving it uncleanly is not.** One exact QR at the hand-off
+(once per solve) fixes it: hybrid+BC now lands at 4.3e-15 / 5.8e-15.
+
+**End to end, load-immune** (accuracy asserted on every row):
+
+| case | ssj | ssj+BC | hybrid | hybrid+BC |
+|---|---|---|---|---|
+| GOE n=400 | 24 sw | 11 sw | 20 sw + 18 it | **9 sw + 6 it** |
+| GOE n=800 | 29 sw | 14 sw | 25 sw + 14 it | **12 sw + 6 it** |
+| clustered 1e-9 n=200 | 33 sw | 9 sw | 32 sw + 8 it | **8 sw + 5 it** |
+| 5-fold deg n=200 | 69 sw | 26 sw | 66 sw (fallback) | 23 sw (fallback) |
+
+An IPT iteration is one gemm against a sweep's measured ~17.7 gemm-equivalents,
+so trading 2 sweeps for 6 iterations plus one hand-off QR is a real saving.
+Degeneracy correctly never opens the gate (ρ = ∞ on exact ties) and falls back
+to pure SSJ+BC unharmed. Caveat kept honest: IPT eigenvectors are only
+implicitly orthogonal — on the 1e-9 cluster the hybrid's ortho is 6.5e-12
+(vs SSJ's 4.2e-15), with residual and eigenvalues at full precision.
+
+**Wall: inconclusive this tick.** Both runs contaminated (14–24% drift; the
+box would not stay quiet). Interleaved ratios *suggest* hybrid+BC ≈ ssj+BC at
+n=400 and ~3% ahead at n=800 (1.49× vs 1.44× over plain ssj) — the plain
+hybrid's sweep saving is visibly eaten by its per-block overheads (re-forming
+B, re-estimating the norm each outer block). A quiet-box wall run is owed.
+
+**What this sharpens for next ticks:** the question is no longer "when can
+the manifold be left" (answer: at the cliff, worth ~20%) but **"what makes the
+pre-cliff phase long, and can anything cheaper than manifold sweeps shorten
+it"**. BC shortens it 2× by handing the iterate diagonal spread. The next
+lever on the same axis: the cliff fires when the *sorted diagonal ordering
+stabilizes* — worth instrumenting whether the pre-cliff sweeps are spent
+sorting eigenvalue positions rather than resolving couplings.
+
+153 + 2 tests pass (`test_hybrid_composes_with_block_preconditioner`,
+`test_hybrid_falls_back_to_ssj_on_exact_ties`).
