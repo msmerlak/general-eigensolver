@@ -1,8 +1,50 @@
-# Map ledger
+# Map ledger — CLOSED
 
-One line per mapping assessed, so a new exploration can see the whole field in
-one read instead of re-deriving it from GENERAL.md. **Append here before
-anything else.** Full write-ups stay in GENERAL.md; this is the index.
+**The map hunt is closed at 34 entries.** This file is now a read-only record;
+the active work is in `SSJ_LOG.md`. Kept because the negative results are the
+point: they cost real measurement and they make future work cheap.
+
+## Why it was closed
+
+Marginal value per iteration was clearly declining. The last four entries
+(#31–#34) were all well-characterized losses, and the untouched ground left —
+hierarchical/H-matrix, tensor structure — consists of large established fields
+where a fresh attempt is unlikely to beat decades of specialized work.
+
+More importantly, the campaign produced a *structural* answer rather than a
+list of failures. **Four independent attempts to escape the divide-by-gap
+generator each landed back on it**, one of them provably (ρ(J) is a
+diagonal-similarity invariant, so no coordinate reconditioning can widen any
+locator basin). The generator, the arctan saturation on it, and the symmetric
+pairing that gives it descent are **one mechanism**, and the space of
+plausible-looking fixes around it is essentially empty. That is a finding, and
+it is why continuing to sample that space had stopped paying.
+
+The wins that do exist all came from the same move: **find a regime where the
+incumbent's structure fails**, not from outrunning it on its home ground.
+Sparse interior eigenpairs win because LU fill-in explodes on unstructured
+sparsity and IPT needs no factorization at all. Nothing here ever beat LAPACK
+or ARPACK at what they are good at, and the lessons below explain why that was
+predictable.
+
+## What remains open, for anyone picking this up
+
+* **GPU validation of SSJ.** The whole premise — every flop a gemm — targets
+  hardware where factorizations are disproportionately expensive. Every verdict
+  here is CPU-measured, on precisely the hardware SSJ was not designed for.
+  `bench_gpu.py` has never had a GPU to run on. That one measurement either
+  validates or retires the method's reason for existing.
+* **A convergence proof for SSJ's linear phase**, now more tractable: descent
+  held on every seed ever run, and the ≈½·log n diagonal-spread mechanism is
+  quantified in `SSJ_LOG.md`.
+* **A fast Cauchy apply (FMM) for the secular map (#28)** — the only basin-free
+  exact method here, O(n²) but losing on constants with crossover near n≈5000.
+  Known technology, known endpoint.
+
+---
+
+One line per mapping assessed. Full write-ups stay in GENERAL.md; this is the
+index.
 
 Incumbents to beat, by regime:
 
