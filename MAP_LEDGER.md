@@ -53,6 +53,25 @@ Incumbents to beat, by regime:
 | 32 | inertia-certified Laguerre on the log-det jet | banded LDL^T carried as a 2nd-order Taylor jet in σ; one pass gives ν (Sylvester) + tr R + tr R²; no gap denominator anywhere | **loses as an eigensolver** — 25–147× flops, 317–1149× wall vs ARPACK shift-invert, which amortizes ONE factorization over all k while this refactorizes at every shift. **Narrow win**: certified window count 2.0–14.0× over `window_count` (#20), crossover N≈250, banded-only, and the certificate is exact on generic shifts but wrong 23/200 with \|Δν\| up to **248** for shifts within 1e-13…1e-9 of an eigenvalue |
 | 33 | stochastic moment measure (SLQ / KPM quadrature of the spectral measure) | a random *measure* carried as scalars; state is shift-independent; fixed point is the spectral measure itself | **loses** — 334× flops / 9,700× wall vs `eigvalsh`, 2,660× flops vs #32, on exact counting. Two floors multiply: resolution **bias** ≈ n/degree (probes cannot touch it) and Hutchinson variance ≈ 90r probes. Exactness needs degree ≳ n — the same order as diagonalizing. Shift-independence is real but amortizes a per-boundary cost that was already ~1e-2 gemm-equiv |
 
+## "Unsolved" means unsolved BY THIS REPO, not unsolved
+
+Stated precisely, because a loose reading of it would let a candidate clear the
+breakthrough bar without beating anything real. In every regime below there is
+already a method that works well; what is missing is a *matmul-only or
+factorization-free* route to it.
+
+| regime | who already solves it | what is actually open |
+|---|---|---|
+| 2D Anderson lattice | ARPACK shift-invert, comfortably — **3.9 solves per eigenpair** at the band centre (#32) | doing it factorization-free; every matvec-only method here fails |
+| dense far-from-diagonal | LAPACK `dgeev`; `sdc_eigvals` reaches only 0.13–0.22× of it | beating `dgeev`, not beating `sdc_eigvals` |
+| exact degeneracy | LAPACK and ARPACK handle it; SSJ handles it natively via the arctan saturation | locators (IPT family) fail on it — a locator that did not would be new |
+
+So a breakthrough must beat **the best available method**, LAPACK and ARPACK
+included — not merely the best method in this repository. Beating an incumbent
+that is itself far off LAPACK is not a win; #33 beat `window_count` by 20.7× in
+flops and that was worthless, because `window_count` is itself 6,900× LAPACK's
+flops on the same task.
+
 ## Recurring lesson
 
 **Four** independent attempts to escape the divide-by-gap generator each landed
@@ -67,8 +86,7 @@ So a candidate that merely re-parameterizes the locator is very unlikely to
 pay. The open ground is elsewhere: state types nobody has used here
 (stochastic/sampling dynamics, moments or continued-fraction coefficients,
 factorizations as state, hierarchical/low-rank off-diagonal structure), or the
-regimes the ledger records as unsolved (2D Anderson lattice; dense
-far-from-diagonal below `sdc_eigvals` cost; exact degeneracy in a locator).
+regimes below where this repository's distinctive approach does not yet win.
 
 A second lesson, from #31: **when the outcome is cheaper to observe than to
 predict, invest in cheap failure, not better prediction.** A candidate whose
