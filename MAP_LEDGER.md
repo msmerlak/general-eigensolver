@@ -73,6 +73,20 @@ that is itself far off LAPACK is not a win; #33 beat `window_count` by 20.7× in
 flops and that was worthless, because `window_count` is itself 6,900× LAPACK's
 flops on the same task.
 
+## Measurement hygiene on this container
+
+Wall-clock numbers here are only meaningful on a **quiet** machine. Measured
+during this campaign, with two autonomous agents benchmarking concurrently:
+LAPACK `eigh` at n=128 timed at **10 s** against its true ~2 ms — a ~5000×
+inflation — with load average 6.3 on 4 cores. An earlier concurrent run
+inflated a LAPACK baseline 0.1 s → 9 s and produced a bogus 26–47× claim that
+was nearly shipped.
+
+So: **hardware-free units are primary** — sweeps, gemm-equivalents, matvecs,
+modelled flops with the same constants on both sides. Those are immune, which
+is why every entry above reports them. Before trusting any wall-clock ratio,
+check `uptime` and re-measure sequentially with nothing else running.
+
 ## Recurring lesson
 
 **Four** independent attempts to escape the divide-by-gap generator each landed
