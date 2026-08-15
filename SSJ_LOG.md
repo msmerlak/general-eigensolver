@@ -60,6 +60,12 @@ found load-bearing:
   fast generator.** Continuation (homotopy) keeps denominators small but cannot
   make them nonzero, and dies on exact degeneracy where SSJ's saturation
   survives it natively.
+* **The polar retraction's saturation is load-bearing too**, not just the
+  arctan on the angles. Swapping the polar factor for Cayley — which rotates
+  each K-plane by 2·arctan(σ/2) instead of arctan(σ), saturating at π rather
+  than π/2 — costs 20→53 sweeps at n=200, 24→266 at n=400, and fails to
+  converge at all at n=800. Both saturations are needed, and the weaker one
+  degrades *with n*.
 * **The symmetric pairing gives the descent property.** A one-sided variant
   aimed at the Schur form loses it and stalls on ~1 instance in 12.
 * **ρ(J) is a diagonal-similarity invariant**, so no coordinate reconditioning
@@ -84,7 +90,8 @@ found load-bearing:
 | Anderson acceleration | diverges (RESULTS.md, independently reproduced) |
 | second-order retraction | no gain |
 | deferred orthonormalization | no gain |
-| CholeskyQR2 retraction | slower than QR on this CPU BLAS |
+| CholeskyQR2 retraction | slower than QR on this CPU BLAS (18.4 gemm-equiv vs 9.2 at n=800) |
+| Cayley retraction (I−K/2)⁻¹(I+K/2) | **does not converge** — n=800 hits the 1000-sweep cap at Δλ 4.8e-2 |
 
 ## Open targets, roughly by expected value
 
@@ -93,11 +100,12 @@ found load-bearing:
    first sweep, anything that reduces iterations without breaking the mechanism.
 2. **Cheapen the retraction.** Now the single largest term by a wide margin:
    measured at **8.73 of a sweep's 17.70 gemm-equivalents (49%)** at n=800, not
-   the 0.67 the flop model claimed. Newton–Schulz is the only cheaper
-   orthogonalization found (4.29 at a fixed target), but swapping wholesale
-   measured only 1.05× end to end (attempt #5) — its adaptive target and the
-   power iteration eat the difference. Anything that makes the retraction
-   genuinely cheaper is now the highest-value engineering target in this list.
+   the 0.67 the flop model claimed. **No cheaper retraction has been found.**
+   Newton–Schulz appeared to cost 4.29 but that measurement was invalid (see
+   attempt #7); verified, it costs 19–27 — *more* than QR — on the early
+   sweeps where ‖K‖₂ is large. Cayley does not converge. Anything that makes
+   the retraction genuinely cheaper remains the highest-value target here, and
+   nothing tried so far does.
 3. **Exploit structure** — banded/sparse input, where forming XᵀAX densely is
    wasteful.
 4. **Deepen mixed precision** beyond the current 1.3–1.4×.
@@ -152,6 +160,7 @@ the tail-exclusion path fires.
 | 4 | **Attack the block pass's memory-bound overhead** — config grid, then a component-level breakdown | **mostly negative.** The hoped-for 1.35× is not there. Config tuning is a flat optimum; one real fix found (n=800 1.38× → **1.47×**). |
 | 5 | **Profile the sweep body**; test whether the cheaper retraction wins | **cost model corrected (6.6× off); one hypothesis refuted, one real 1.60× win.** `method="gemm"` + BC is now the fastest configuration. |
 | 6 | **Rebuild `_angles` in place**; O(n log n) tie detection instead of O(n²) | **shipped, bit-identical.** 2.0–2.9× on the map itself, **1.04–1.09× end to end** — diluted by Amdahl. |
+| 7 | **Cheapen the retraction** (target #2, 49% of a sweep): Cayley transform; re-verify the Newton–Schulz comparison | **negative, and it invalidates a number in #5.** Cayley does not converge at n=800. QR is the cheapest verified retraction. |
 
 ### 1. SSJ-BC — verified
 
@@ -545,3 +554,69 @@ One caution for reading this log: the `×LAPACK` column is not comparable
 across attempts. LAPACK `eigh` at n=1200 measured 171.7 ms in attempt #5 and
 214.1 ms here on the same box. Only the interleaved old/new ratios within a
 single run are trustworthy.
+
+### 7. The retraction — nothing cheaper exists, and #5 had a bad number
+
+Target #2 is now the largest term in a sweep (49%), so this went after it.
+Both results are negative, and one of them retracts a measurement from #5.
+
+**Attempt #5's Newton–Schulz figure was invalid.** It reported
+`_orth_ns_adaptive` at 4.29 gemm-equivalents against QR's 8.73, and this log
+then re-ranked target #2 around "Newton–Schulz is the only cheaper
+orthogonalization found". That measurement never checked its output. Re-run
+with a verification step:
+
+| retraction (n=800) | cost | ‖QᵀQ − I‖ |
+|---|---|---|
+| `_orth_qr` | 9.24 | 3.3e-14 ✓ |
+| NS, target 1e-3 | 4.45 | **4.7e+08** ✗ |
+| NS, target 1e-14 | 4.47 | **4.7e+08** ✗ |
+| NS, capped + prescaled | **22.19** | 8.0e-15 ✓ |
+| Cayley + `X @ Q` | 11.08 | 1.6e-13 ✓ |
+
+Newton–Schulz **diverged**. On a first sweep ‖K‖₂ is 18–33, so
+σ(I+K) = √(1+σ²) is far above the √3 convergence radius; the iteration blew
+up, `_orth_ns_adaptive`'s stagnation guard (`dev > 0.9·prev`) tripped
+immediately, and it returned fast. Fast because it failed. Done properly —
+spectrally capped and prescaled, as `method="gemm"` actually does it — it
+costs **19–27, i.e. 2–3× *more* than QR**, not less.
+
+That also explains what #5 could not: why `method="gemm"` measured only 1.05×
+end to end despite an apparently 2× cheaper retraction. There was no cheaper
+retraction. (Why gemm is not *slower*: NS cost tracks ‖K‖₂, which is huge on
+the first sweeps and small later, so a single-sweep number cannot settle it
+either way. The 1.05× end-to-end figure stands as the trustworthy one.)
+
+**Cayley: a clean dead end.** For anti-Hermitian K, `(I − K/2)⁻¹(I + K/2)` is
+exactly orthogonal, replacing a QR with one linear solve — per-sweep, 1.14×
+cheaper than QR at n=1200 (and *dearer* below). It is unusable anyway:
+
+| case | `auto` | Cayley |
+|---|---|---|
+| GOE n=200 | 20 | 53 |
+| GOE n=400 | 24 | **266** |
+| GOE n=800 | 29 | **1000 — did not converge**, Δλ/‖A‖ 4.8e-2 |
+| 5-fold deg n=200 | 69 | 73 |
+| clustered 1e-9 n=200 | 33 | 67 |
+
+The polar factor rotates each K-invariant plane by arctan(σ); Cayley by
+2·arctan(σ/2), saturating at π instead of π/2. **That weaker saturation is
+fatal, and gets worse with n** — the loss runs 2.7× at n=200, 11× at n=400,
+divergent at n=800. Recorded above as a mechanism fact: this log already noted
+the arctan on the *angles* as load-bearing; the saturation in the *retraction*
+is a second, independent one. Reverted; no code shipped.
+
+Factor-form drift showed up too, as this module's docstring predicts:
+orthogonality ran 1.5e-13 → 3.4e-12 across n=200→800, against QR's ~1e-14,
+because `X @ Q` never re-measures X's accumulated defect.
+
+**Where target #2 now stands:** QR at 8.7–11.2 gemm-equivalents is the
+cheapest *verified* retraction available. CholeskyQR2 (18.4), capped
+Newton–Schulz (19–27) and Cayley (divergent) are all worse. The 49% remains
+open, with three of the obvious candidates now closed off.
+
+**Method note.** Two invalid measurements in this log have now had the same
+cause: timing a numerical routine without checking it produced a right answer
+(#5's Newton–Schulz here; #3's flop model was a different error). A timing
+harness for anything iterative should assert on its output — a routine that
+fails fast looks exactly like a routine that is fast.
