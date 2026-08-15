@@ -6,43 +6,42 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #9)*
+*(rewritten each tick; as of attempt #10)*
 
-**Fast eigensolvers divide by gaps** — a Newton step in disguise. Its price is
-a basin (ρ = max|W|/gap < 1) or a saturation to survive outside one. Every
-slow method here (Brockett, flows, homotopy) declines to divide by the gap.
+**Fast eigensolvers divide by gaps** — a Newton step in disguise; the price is
+a basin (ρ < 1) or a saturation. **The solve is two phases**: a self-
+accelerating globalization (couplings feed the diagonal, spread widens gaps,
+gaps shrink angles — no plateau, cost concentrated where spread is smallest),
+then a cliff into the basin where the endgame needs no manifold (IPT, #8).
+Spread can be injected up front — the block-size schedule, 15 → 8 sweeps (#9).
 
-**The solve has exactly two phases, and the anatomy is now measured** (#9):
-the pre-basin phase is ONE self-accelerating loop — couplings feed the
-diagonal, spread widens gaps, wider gaps shrink angles, smaller angles feed
-faster. Contraction improves monotonically (0.99 → 0.09); there is no plateau.
-The binding pair is *always adjacent in sorted diagonal order* — the
-constraint is always a local resonance. The basin then opens as a cliff (ρ
-falls through 1 in one sweep) exactly when the last eigenvalue-assignment
-resolves; the endgame after it is ~20% of sweeps and needs no manifold at all
-(IPT: pure gemm, v_jj = 1 — #8).
+**The merge is irreducibly global (#10).** After the halves are diagonalized,
+the ANGLES are local in sorted order (91% of K-mass within d ≤ 64 — gaps grow
+with distance) but the COUPLINGS are not (15% of B-mass within d ≤ 32), and
+coupling mass is what must die. Annihilating a pair removes its whole coupling
+regardless of how small the angle is, so the O(n²) tiny far-pair rotations do
+most of the B-mass removal. Two independent refutations: block-passes-only
+stalls at rel_off 4–6 on every spectrum, and banding K stalls even at b
+covering 97% of K-mass. **Rotation mass ≠ annihilation work.** No banded/local
+merge can work; the dense map and its dense retraction are the price of
+global annihilation.
 
-**So cost concentrates where spread is smallest.** The first half of a plain
-GOE solve buys ONE decade of error; the last third buys thirteen. Anything
-injecting diagonal spread up front collapses the expensive phase: that is
-what BC is, and doing it with a *schedule* — blocks of n/2, n/4, then 32 —
-is worth 15 → 8 sweeps at n=800 (#9). The exception proves the mechanism:
-exact degeneracy is bottlenecked on tie-resolution, not spread, and the
-schedule buys nothing there.
+**Load-bearing, as measured:** both saturations (#7); the map's global reach
+(#10); exact orthogonality at the hand-off (#8); manifold only pre-cliff (#8).
+**Conventions overturned:** fixed block size (#9); always-tight NS floor (#5);
+"NS is cheaper than QR" (#7, invalid measurement).
 
-**Load-bearing vs convention, as measured:** both saturations load-bearing
-(#7: Cayley's weaker one diverges, worse with n); manifold orthogonality
-load-bearing ONLY pre-cliff, and must be exact at the hand-off (#8's 1e-8
-bug); the fixed block size was a convention (#9); QR-every-sweep is
-load-bearing only in the sense that nothing cheaper survives (#7).
-
-**Deepest open question now:** the schedule converges toward "diagonalize two
-halves, merge by SSJ" — so the remaining cost IS the merge. After the halves
-are diagonalized, is the coupling effectively *banded in sorted order* (the
-binding pairs are only the ~n interleaving adjacencies)? If yes, the merge
-sweeps could act on a band at O(n²·b) instead of full frames at O(n³) — that
-is the experiment for a next tick, and it is where "beat LAPACK's D&C merge"
-either becomes real or dies.
+**Where the remaining headroom is, honestly:** sweep count is near its floor
+(merge contraction runs 0.5 → 0.01, close to quadratic; 8 sweeps at n=800),
+and per-sweep cost is floored by B-form + angles + a QR that nothing local or
+cheaper replaces. What is NOT yet exploited: (1) **precision** — the
+globalization phase is noise-tolerant because the map is memoryless, so the
+schedule's expensive early phase should run in fp32 and only the tail in
+fp64: mixed × schedule × hybrid has never been measured together; (2)
+**hardware** — every piece shipped (gemm sweeps, batched-eigh blocks, IPT) is
+GPU-shaped, and the Colab notebook predates the schedule and the hybrid.
+Deepest open question: does the full composition close the gap to LAPACK on
+CPU, and does it invert the ratio on a GPU?
 
 ## What SSJ is, and where the cost sits
 
@@ -203,6 +202,7 @@ the tail-exclusion path fires.
 | 7 | **Cheapen the retraction** (target #2, 49% of a sweep): Cayley transform; re-verify the Newton–Schulz comparison | **negative, and it invalidates a number in #5.** Cayley does not converge at n=800. QR is the cheapest verified retraction. |
 | 8 | **Compose the globalizer with the manifold-free endgame** (`ssj_ipt_eigh` + BC), and instrument where the basin opens | **shipped, with a real bug found by the output assert.** The basin opens as a *cliff*; hybrid+BC = 12 sweeps + 6 gemms at n=800. |
 | 9 | **Anatomy of the pre-cliff phase, then a block-size SCHEDULE** (big blocks early, small late) | **the campaign's best result.** GOE n=800: 15 → 8 sweeps; wall 1.90× over plain, 2.13× with the hybrid — 13.5–15.9× LAPACK, from 28–34×. |
+| 10 | **Is the merge local?** K/B mass vs sorted distance; block-passes-only solver; banded-K map | **decisively no — with the campaign's sharpest mechanism finding.** Angles are local, couplings are not; rotation mass ≠ annihilation work. |
 
 ### 1. SSJ-BC — verified
 
@@ -799,3 +799,50 @@ whether an SSJ-style merge can ever compete with LAPACK's O(n²) secular merge.
 
 159 tests pass (4 new: schedule wins on GOE, scalar/singleton bit-equivalence,
 degeneracy guard, entry capping).
+
+### 10. The merge is irreducibly global — locality is a red herring
+
+Attempt #9 queued the decisive question for the divide-and-conquer reading:
+after the halves are diagonalized, is the coupling banded in sorted order, so
+merge sweeps could act on a band at O(n²·b)? Answer: **no, twice over**, and
+the reason is the campaign's sharpest mechanism finding.
+
+**The localization law is real — for the wrong quantity.** After the [n/2]
+pass at n=400, cumulative squared-mass within sorted-position distance d:
+
+| | d≤8 | d≤32 | d≤64 | d≤128 |
+|---|---|---|---|---|
+| angles K | 0.45 | 0.80 | **0.91** | 0.97 |
+| couplings B | 0.04 | 0.15 | 0.30 | 0.54 |
+
+K localizes (~1/d², summable — gaps grow linearly with sorted distance) but
+**B does not**, and off(B) is what must die.
+
+**Refutation 1 — block passes only.** A sorted-block pass is an exact
+orthogonal similarity: B and X update incrementally, no B re-form, no angle
+map, no retraction — the manifold is free. If rotation were local this would
+be the whole merge. It stalls at rel_off 4.1–5.9 on *every* spectrum (GOE,
+degenerate, clustered), at exactly the long-range B-mass the local passes can
+never reach. (Side-finding worth keeping: after 160 incremental exact-
+similarity passes, X's orthogonality drift is only 3e-13 — no-reform
+bookkeeping is numerically sound.)
+
+**Refutation 2 — banding the map itself.** Mask K to |i−j| ≤ b in sorted
+order, keep everything else (full B re-form each sweep, dense QR), so dropped
+pairs return every sweep. Even **b=128 — 97% of K-mass — does not converge**
+(dlam 1e-1 at 120 sweeps, vs 24 sweeps full). b=8…64 all likewise.
+
+**The mechanism:** annihilating a pair removes its *entire* coupling
+regardless of the angle's size — work done scales with coupling mass, not
+rotation mass. The O(n²) tiny far-pair rotations ARE most of the B-mass
+removal. So the map's global reach joins the two saturations as load-bearing,
+the dense retraction is the price of global annihilation (closing the
+"cheapen QR via structure" line for good), and the elegant-looking banded
+merge is dead with a clean cause of death.
+
+No code shipped (scratchpad prototypes only; negative result). Where this
+leaves the campaign is rewritten in the reflection section: sweep count near
+floor, per-sweep cost floored — the unexploited axes are precision (the
+memoryless map makes the expensive globalization phase noise-tolerant) and
+hardware (everything shipped is GPU-shaped). Next tick: the full
+mixed × schedule × hybrid composition, never measured together.
