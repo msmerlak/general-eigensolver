@@ -52,6 +52,7 @@ Incumbents to beat, by regime:
 | 31 | Perron balancing of the gap-weighted coupling graph | positive diagonal; fixed point is a Perron ray | **no-go, proved and verified** — 0 of 15 basin cases changed; ρ(J) is exactly invariant under diagonal similarity (8.5e-16), so no reconditioning can move the basin. By-product screen ρ(\|J\|) is a better classifier (AUC 0.988 vs 0.944) but costs more than the solve it screens |
 | 32 | inertia-certified Laguerre on the log-det jet | banded LDL^T carried as a 2nd-order Taylor jet in σ; one pass gives ν (Sylvester) + tr R + tr R²; no gap denominator anywhere | **loses as an eigensolver** — 25–147× flops, 317–1149× wall vs ARPACK shift-invert, which amortizes ONE factorization over all k while this refactorizes at every shift. **Narrow win**: certified window count 2.0–14.0× over `window_count` (#20), crossover N≈250, banded-only, and the certificate is exact on generic shifts but wrong 23/200 with \|Δν\| up to **248** for shifts within 1e-13…1e-9 of an eigenvalue |
 | 33 | stochastic moment measure (SLQ / KPM quadrature of the spectral measure) | a random *measure* carried as scalars; state is shift-independent; fixed point is the spectral measure itself | **loses** — 334× flops / 9,700× wall vs `eigvalsh`, 2,660× flops vs #32, on exact counting. Two floors multiply: resolution **bias** ≈ n/degree (probes cannot touch it) and Hutchinson variance ≈ 90r probes. Exactness needs degree ≳ n — the same order as diagonalizing. Shift-independence is real but amortizes a per-boundary cost that was already ~1e-2 gemm-equiv |
+| 34 | commutant map (automorphism detection + isotypic block reduction) | a discrete **group element** π; fixed-point set is Aut(A), which carries no spectral information | **conditional win, measure-zero condition.** Beats `dsyevd` where an exact free cyclic automorphism exists, but the reduction is classical (Bloch / symmetry-adapted bases) and the condition has a hard cliff at relative defect ~1e-12 — τ swept 1e-13→1e-4 changed **0 of 8** decisions. Capped at ≈4n/W ≈ 57 by its own Θ(n²) detection, not by g²/2 = 512. Declines correctly on GOE, but costs 81–222% of the ARPACK solve to decline on 2D Anderson — **empty in the open regime**. Exact (5.4e-15) on symmetry-induced degeneracy where `ipt_eigh` returns NaN |
 
 ## "Unsolved" means unsolved BY THIS REPO, not unsolved
 
@@ -115,3 +116,18 @@ So **exact counting is where factorization is structurally unbeatable**, exactly
 as being factorization-free is what wins for sparse interior eigenpairs. The
 two lessons bracket the regime: match the tool to which of the two questions is
 being asked, because no single mechanism wins both.
+
+A sixth, from #34, about **where the cost actually goes once you beat n³**: the
+O(n³/g²) block solve became **0.6% of the total call**, and with eigenvectors the
+answer's own memory footprint — an n×n *complex* matrix — cost **16× the solve**.
+So the speedup was capped by the method's own Θ(n²) detection at ≈4n/W ≈ 57,
+not by the group at g²/2 = 512. **Any method that reduces n³ to n³/g² on a
+dense problem runs into its own Θ(n²) floor**, and complex output doubles it.
+Check that floor before assuming an asymptotic win survives contact.
+
+A seventh, also from #34: a knob that cannot change any decision is not a
+tolerance. Sweeping τ over nine orders of magnitude changed 0 of 8 accept/reject
+outcomes, because the exact verifier sat downstream of an exact-match
+constructor — the cliff was in construction, not in verification. If a
+parameter never moves an outcome, the robustness it appears to offer is
+imaginary.
