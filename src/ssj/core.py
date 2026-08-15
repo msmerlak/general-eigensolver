@@ -268,20 +268,33 @@ def _block_pass(B, X, m: int, offset: int):
     blocks = B[:keep, :keep].reshape(nb, m, nb, m)[idx, :, idx, :]
     blocks = (blocks + blocks.conj().transpose(0, 2, 1)) / 2.0
     Q = xp.linalg.eigh(blocks)[1]  # batched over the leading axis
-    Qh = Q.conj().transpose(0, 2, 1)
+    # Apply Q block-diagonally. Materializing the (keep, keep) block-diagonal
+    # factor and using one dense gemm costs n/m times the flops -- 3.0
+    # gemm-equivalents per pass at n=800, m=32 against 0.12 here.
+    #
+    # Two ways to avoid that, and the better one depends on the backend. NumPy
+    # wants the loop: each slice is contiguous, so the gemms read and write the
+    # target in place with no temporary at all, and nb is only ~25. CuPy wants
+    # the batched form: nb separate kernel launches are latency-bound on a GPU,
+    # which is worth more than the reshape/transpose copies it costs.
+    if xp is np:
+        for b in range(nb):
+            s = slice(b * m, (b + 1) * m)
+            Qb = Q[b]
+            X[:, s] = X[:, s] @ Qb
+            B[:, s] = B[:, s] @ Qb
+            B[s, :] = Qb.conj().T @ B[s, :]
+    else:  # pragma: no cover - GPU path
+        Qh = Q.conj().transpose(0, 2, 1)
 
-    # Apply Q block-diagonally, batched. Materializing the (keep, keep)
-    # block-diagonal factor and using one dense gemm instead costs n/m times
-    # the flops -- 3.0 gemm-equivalents per pass at n=800, m=32, against 0.12
-    # here -- which measured as most of the sweep gain being handed back.
-    def _rmul(M):  # M (r, keep) -> M with each column block times its Q_b
-        r = M.shape[0]
-        return ((M.reshape(r, nb, m).transpose(1, 0, 2) @ Q)
-                .transpose(1, 0, 2).reshape(r, keep))
+        def _rmul(M):
+            r = M.shape[0]
+            return ((M.reshape(r, nb, m).transpose(1, 0, 2) @ Q)
+                    .transpose(1, 0, 2).reshape(r, keep))
 
-    X[:, :keep] = _rmul(X[:, :keep])
-    B[:, :keep] = _rmul(B[:, :keep])
-    B[:keep, :] = (Qh @ B[:keep, :].reshape(nb, m, n)).reshape(keep, n)
+        X[:, :keep] = _rmul(X[:, :keep])
+        B[:, :keep] = _rmul(B[:, :keep])
+        B[:keep, :] = (Qh @ B[:keep, :].reshape(nb, m, n)).reshape(keep, n)
     return (B + B.conj().T) / 2.0, X
 
 

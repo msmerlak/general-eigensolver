@@ -57,6 +57,45 @@ def test_block_pass_is_monotone_and_similar(n, m):
     assert prev < off_frobenius(A)
 
 
+def test_batched_and_looped_apply_agree():
+    """_block_pass takes the looped branch on numpy and the batched branch on
+    cupy. Only the first runs in CI, so pin the second against it here --
+    otherwise the GPU path can drift untested."""
+    n, m = 128, 32
+    r = np.random.default_rng(11)
+    M = r.standard_normal((n, n))
+    B0 = (M + M.T) / np.sqrt(2 * n)
+    X0 = np.linalg.qr(r.standard_normal((n, n)))[0]
+
+    nb, keep = n // m, (n // m) * m
+    p = np.argsort(np.diag(B0))
+    B, X = B0[p][:, p], X0[:, p]
+    idx = np.arange(nb)
+    blocks = B[:keep, :keep].reshape(nb, m, nb, m)[idx, :, idx, :]
+    Q = np.linalg.eigh((blocks + blocks.transpose(0, 2, 1)) / 2.0)[1]
+
+    Bl, Xl = B.copy(), X.copy()
+    for b in range(nb):
+        s = slice(b * m, (b + 1) * m)
+        Xl[:, s] = Xl[:, s] @ Q[b]
+        Bl[:, s] = Bl[:, s] @ Q[b]
+        Bl[s, :] = Q[b].T @ Bl[s, :]
+
+    Bb, Xb = B.copy(), X.copy()
+
+    def rmul(Mx):
+        return ((Mx.reshape(Mx.shape[0], nb, m).transpose(1, 0, 2) @ Q)
+                .transpose(1, 0, 2).reshape(Mx.shape[0], keep))
+
+    Xb[:, :keep] = rmul(Xb[:, :keep])
+    Bb[:, :keep] = rmul(Bb[:, :keep])
+    Bb[:keep, :] = (Q.transpose(0, 2, 1) @ Bb[:keep, :].reshape(nb, m, n)
+                    ).reshape(keep, n)
+
+    assert np.allclose(Xl, Xb, atol=1e-13)
+    assert np.allclose(Bl, Bb, atol=1e-13)
+
+
 def test_block_pass_noop_when_block_spans_problem():
     A = goe(20, seed=1)
     B, X = _block_pass(A.copy(), np.eye(20), 20, 0)

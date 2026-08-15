@@ -135,6 +135,7 @@ the tail-exclusion path fires.
 | 1 | **SSJ-BC**: block-cluster preconditioner (block-Jacobi pass on sorted-diagonal blocks) + mass-capped angle gate + Newton–Schulz target floor | **real, verified independently — the first genuine improvement.** See below. |
 | 2 | **Integrate SSJ-BC into `src/ssj/core.py`** behind `block_m`, default off; batched block pass; test the `block_until` gate | **shipped.** Sweep gains reproduce exactly. Two inherited claims did *not* survive re-measurement — see below. |
 | 3 | **Wall time for SSJ-BC**, the measurement owed by #2 — and the dense-`Qfull` defect it exposed | **fixed and measured.** 1.27–2.11× wall. The block application was costing `n/m`× the flops it needed to. |
+| 4 | **Attack the block pass's memory-bound overhead** — config grid, then a component-level breakdown | **mostly negative.** The hoped-for 1.35× is not there. Config tuning is a flat optimum; one real fix found (n=800 1.38× → **1.47×**). |
 
 ### 1. SSJ-BC — verified
 
@@ -318,3 +319,81 @@ improvement, and would be worth ~1.35× on top of what is measured here.
 shipped default. A real improvement, and still not competitive on a cold dense
 solve — which is what the GPU notebook exists to re-ask on hardware where the
 incumbent is weaker.
+
+### 4. The memory-bound overhead — mostly a negative result
+
+Attempt #3 logged the gap between the flop model (1.87× at n=800) and measured
+wall (1.38×) as memory traffic, and estimated ~1.35× available from removing
+it. **That estimate was wrong.** Two lines of attack, one small win.
+
+**Config tuning is a flat optimum — do not retry.** A block pass costs
+arithmetic that grows with `m` while the sweep saving also grows with `m`, and
+the two cancel almost exactly. Modelled total gemm-equivalents over the grid:
+
+| config | GOE n=400 | GOE n=800 | 5-fold deg n=200 | clustered n=200 |
+|---|---|---|---|---|
+| default | 64.1 | 77.4 | 184.2 | 88.1 |
+| m=32 p=1 | 41.7 | 47.8 | **93.2** | 41.4 |
+| m=32 p=2 | **36.2** | 41.3 | 105.8 | **38.1** |
+| m=64 p=1 | 41.4 | 44.7 | 126.6 | 43.8 |
+| m=64 p=2 | 38.1 | 39.5 | 176.7 | 49.5 |
+| m=128 p=2 | 49.5 | **38.1** | 267.7 | 60.9 |
+
+The best config differs per case and the optimum is shallow (36–41 across most
+of the grid at n≥400). The hypothesis that `(m=64, p=1)` would beat
+`(m=32, p=2)` by halving the permutations is **false** — it is worse at three
+of four cases. `m=32, passes=2` is a fine default; there is no tuning win here.
+
+**The flop model understates a block pass by ~21×.** Measured components, one
+pass at n=800, m=32, in units of one n³ gemm (quiet box, min-of-7):
+
+| component | cost | note |
+|---|---|---|
+| permute B (two-sided) | 0.68 | pure memory traffic |
+| permute X | 0.43 | pure memory traffic |
+| extract blocks | 0.00 | free |
+| batched `eigh` | 0.71 | ~130 µs per 32×32 block — call overhead, not flops |
+| apply ×3 | 1.14 | |
+| **total** | **2.96** | **model said 0.141** |
+
+So the overhead is not one removable copy; it is spread across permutation,
+LAPACK call overhead, and the applies. Two levers tested against it:
+
+* **Batched `eigh` vs a Python loop of `eigh` calls: a wash** (within noise at
+  every size). The ~130 µs per 32×32 block is LAPACK entry cost and is not
+  recoverable by restructuring.
+* **The apply: a real but small win.** Attempt #3 chose the batched
+  reshape/transpose form on the assumption that a Python loop is bad. On
+  *NumPy* that assumption is wrong — each column block is a contiguous slice,
+  so a loop of `nb` gemms writes the target in place with no temporary at all,
+  and `nb` is only ~25. Measured 1.15–1.69× on the apply alone.
+
+**Shipped:** the apply is now looped on NumPy and batched on CuPy, chosen by
+backend, since a GPU genuinely does prefer the batched form (`nb` kernel
+launches are latency-bound there). A test pins the two implementations against
+each other on NumPy so the GPU branch cannot drift untested.
+
+**Wall, quiet box, interleaved min-of-7** (contamination check 4.9–5.8% drift,
+the cleanest run in this log; LAPACK calibrates at 1.07–1.13× the reference):
+
+| case | attempt #3 | now |
+|---|---|---|
+| GOE n=200 | 1.27× | 1.27× |
+| GOE n=400 | 1.39× | **1.41×** |
+| GOE n=800 | 1.38× | **1.47×** |
+| 5-fold deg n=200 | 1.67× | 1.65× |
+| clustered 1e-9 n=200 | 2.11× | **2.19×** |
+
++6.5% at n=800, ~1–4% elsewhere, and nothing at n=200. A real gain, an order
+of magnitude short of the 1.35× attempt #3 predicted. **The prediction was
+wrong because it assumed the overhead was one identifiable copy; it is
+distributed, and most of it is irreducible LAPACK and permutation cost.**
+
+Sweep counts are unchanged except exact 5-fold degeneracy, which moved 25 → 26
+— gemm blocking differs between the two applies, which shifts a borderline
+convergence test by one sweep. Benign, and worth knowing when comparing runs.
+
+**What is actually left at n=800:** the sweep body itself is ~110 ms while the
+two block passes add ~55 ms. Halving the sweep count is therefore bought at
+50% overhead per sweep, which is the whole story of the 1.47×. Further gains
+have to come from the *sweep body*, not the block pass.
