@@ -224,6 +224,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `experiments_secular.py` — a scalar map: eigenvalues as roots of a rational function, exact at any coupling, O(n^2)
 - `experiments_inertia.py` — inertia-certified Laguerre on the log-det jet: loses as an eigensolver, wins 2-14x on certified window counting (banded only)
 - `MAP_LEDGER.md` — index of every mapping assessed, with verdicts
+- `SSJ_LOG.md` — the SSJ improvement track: baseline, load-bearing mechanism, dead ends, open targets
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
 - `RESULTS.md` — original measured results (Julia reference implementation)
