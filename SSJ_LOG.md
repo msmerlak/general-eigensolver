@@ -90,6 +90,44 @@ found load-bearing:
 5. **A convergence proof.** None is known. Genuinely valuable and the one item
    here that is a theory contribution rather than an engineering one.
 
+## The GPU question, and how to answer it
+
+`ssj_gpu_colab.ipynb` (repo root) is a standalone Colab notebook that measures
+the one thing this repo cannot measure on its own hardware: **whether the
+SSJ-to-incumbent ratio shrinks on a GPU.** The argument for expecting it to is
+structural — with `method="gemm"` every SSJ flop is a matmul, while `syevd`
+spends much of its time in memory-bound `symv` inside the tridiagonal
+reduction, which GPUs execute badly.
+
+It reports a **difference of ratios** (SSJ/LAPACK on CPU vs SSJ/cuSOLVER on
+GPU), measured in one session, so the answer cannot be confounded by which
+machine Colab hands out. It also prints cuSOLVER's cost in gemm-equivalents,
+which alone decides the outcome: SSJ needs 55–80, so unless cuSOLVER rises
+above that on the incumbent side, SSJ cannot win the cold solve.
+
+Three things worth knowing before reading its output:
+
+* **Consumer GPUs are fp64-crippled** (T4/P100 run fp64 at 1/32 of fp32;
+  A100/V100 at 1/2). Cell 1 *measures* the ratio rather than assuming it and
+  says which rows are meaningful. A null result on a T4 is not a null result.
+* **The cold solve is SSJ's worst case.** The notebook also measures
+  warm-started tracking, where SSJ takes 1–5 sweeps and `syevd` has no way to
+  accept a warm start at all. That is the only regime where a ratio below 1 is
+  plausible, and it is the claim most likely to survive.
+* The notebook carries a **standalone copy** of the solver (the repo is
+  private, so Colab cannot clone it). Two deliberate GPU-specific deviations,
+  both marked in its source: the power iterations drop their per-iteration host
+  syncs (~125 per sweep), and the block pass is batched.
+
+**Validated before shipping, on the NumPy path** (the code is
+backend-agnostic, so NumPy exercises what CuPy would): all 30
+config × spectrum combinations converge with residual ≤1e-14 and
+orthogonality ≤1e-12; the batched block pass reproduces the CPU SSJ-BC sweep
+counts *exactly* (exact 5-fold degeneracy 69→25, clustered-1e-9 33→9, GOE
+n=400 24→10); and the block pass is strictly monotone in off(B) — measured
+increase exactly 0.0 — including at n=300, where m=32 does not divide n and
+the tail-exclusion path fires.
+
 ## Attempts
 
 | # | attempt | verdict |
