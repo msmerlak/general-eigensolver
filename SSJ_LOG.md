@@ -14,8 +14,17 @@ repeat
     X ← orth( X(I + K) )
 ```
 
-Per sweep: 2 gemms (form B) + 1 orthogonalization (QR ≈ 0.67 gemm-equivalents,
-or an adaptive Newton–Schulz endgame) ≈ **2.67 gemm-equivalents**.
+Per sweep, *by flop count*: 2 gemms (form B) + 1 orthogonalization (QR ≈ 0.67
+gemm-equivalents, or an adaptive Newton–Schulz endgame) ≈ 2.67
+gemm-equivalents.
+
+> **That model is wrong by 6.6×, and much of this log was calibrated on it.**
+> Attempt #5 profiled a sweep: at n=800 it is **17.7 gemm-equivalents**, not
+> 2.67. `_orth_qr` alone costs 8.73 (LAPACK QR runs far below gemm efficiency)
+> and `_angles` costs 4.82 (a dozen n² elementwise passes, one of them a
+> transcendental). Only `form B` (2.04) and `Y = X(I+K)` (1.29) match the
+> model. Use the flop model for *asymptotics*; use measured gemm-equivalents
+> for anything that decides a design.
 
 Baseline measured for this log (GOE, sequential, min-of-3, `np.linalg.eigh` as
 the LAPACK reference):
@@ -136,6 +145,7 @@ the tail-exclusion path fires.
 | 2 | **Integrate SSJ-BC into `src/ssj/core.py`** behind `block_m`, default off; batched block pass; test the `block_until` gate | **shipped.** Sweep gains reproduce exactly. Two inherited claims did *not* survive re-measurement — see below. |
 | 3 | **Wall time for SSJ-BC**, the measurement owed by #2 — and the dense-`Qfull` defect it exposed | **fixed and measured.** 1.27–2.11× wall. The block application was costing `n/m`× the flops it needed to. |
 | 4 | **Attack the block pass's memory-bound overhead** — config grid, then a component-level breakdown | **mostly negative.** The hoped-for 1.35× is not there. Config tuning is a flat optimum; one real fix found (n=800 1.38× → **1.47×**). |
+| 5 | **Profile the sweep body**; test whether the cheaper retraction wins | **cost model corrected (6.6× off); one hypothesis refuted, one real 1.60× win.** `method="gemm"` + BC is now the fastest configuration. |
 
 ### 1. SSJ-BC — verified
 
@@ -397,3 +407,76 @@ convergence test by one sweep. Benign, and worth knowing when comparing runs.
 two block passes add ~55 ms. Halving the sweep count is therefore bought at
 50% overhead per sweep, which is the whole story of the 1.47×. Further gains
 have to come from the *sweep body*, not the block pass.
+
+### 5. The sweep body — a corrected cost model, and a 1.60×
+
+Attempt #4 concluded that further gains must come from the sweep body. Two
+things came out of profiling it: the log's cost model is wrong, and the
+Newton–Schulz floor added in #2 was quietly costing 1.6×.
+
+**The cost model was understated 6.6×.** One sweep at n=800, measured against
+a same-size gemm on a quiet box (min-of-7):
+
+| component | measured | flop model |
+|---|---|---|
+| `_orth_qr` | **8.73** | 0.67 |
+| `_angles` | **4.82** | ~0 |
+| form B (2 gemms) | 2.04 | 2.0 ✓ |
+| `Y = X(I+K)` (1 gemm) | 1.29 | 1.0 ✓ |
+| symmetrize + off_frob | 0.68 | ~0 |
+| **sweep total** | **17.70** | **2.67** |
+
+The two gemm terms are accurate; everything else is not. QR runs far below
+gemm efficiency, and `_angles` is a dozen n² elementwise passes. For reference
+`_orth_cholqr2` measures 18.36 — on its own more than a whole sweep, which
+independently confirms this log's existing dead-end entry for it.
+
+**Refuted: "the cheaper retraction wins."** The profile shows
+`_orth_ns_adaptive` at 4.29 against QR's 8.73, suggesting `method="gemm"`
+(which uses Newton–Schulz every sweep, safe because its spectral cap keeps
+σ(I+K) ≤ √2 < √3) should be ~2× faster. **End to end it is 1.05×.** The
+profile timed NS at a *fixed* target of 1e-9; the real path uses an adaptive
+target that tightens toward 1e-15, and adds a power iteration each sweep.
+Generalizing from one unrepresentative operating point — the same error shape
+as attempt #3's flop model.
+
+**Found instead: the `_ns_target` floor fires from the first sweep.** With BC
+active, #2 set the target to `min(base, 0.1·tol)` unconditionally. For `gemm`,
+`base = 0.05·rel_off`, so at rel_off ≈ 1 the very first sweep was being asked
+for 1e-14 orthogonality — several Newton–Schulz iterations nobody needs, every
+sweep. The defect only has to be small on the *last* sweep, because the
+product-form retraction re-measures and corrects it each time.
+
+Now it tightens only when the contraction just observed predicts convergence
+within `_NS_TIGHTEN_MARGIN · tol`. **Cold GOE, quiet box, interleaved
+min-of-5** (contamination 7.4–8.8%):
+
+| margin | n=800 gemm+BC | n=1200 gemm+BC | warm start ε=1e-6 |
+|---|---|---|---|
+| always-on (#2) | 2812 ms (1.00×) | 8061 ms (1.00×) | 2 sweeps |
+| 1e12 | 1917 ms (1.47×) | 5419 ms (1.49×) | 2 sweeps |
+| **1e9 (shipped)** | **1755 ms (1.60×)** | **4958 ms (1.63×)** | **2 sweeps** |
+| 1e6 | 1805 ms (1.56×) | 5159 ms (1.56×) | 3 — **regression** |
+
+1e9 is best on both axes. Too thin and a warm start beginning at rel_off ≈
+3.6e-6 never tightens at all and loses a whole sweep; too wide and cold solves
+tighten from sweep one and give the saving back. **Tightening a sweep early
+costs a few NS iterations; tightening a sweep late costs an entire sweep** —
+so the optimum sits wide.
+
+**Accuracy is not paid for this.** The sensitive combination is a 1e-9 cluster
+under `method="gemm"`, which without *any* tightening loses 2–3 digits
+(|Δλ|/‖A‖ 4.5e-13, orthogonality 4.8e-12 — #2's claim, verified). At margin
+1e9 it finishes at **2.5e-15 and 7.0e-15**, matching the always-on floor's
+2.9e-15 and 9.5e-15. Across GOE, degenerate and clustered spectra at both
+methods, |Δλ|/‖A‖ ≤ 6.6e-15 and orthogonality ≤ 1.5e-14.
+
+Also verified, since #2 measured the floor for both paths: **the floor buys
+`method="auto"` nothing** — identical sweeps and error with and without, on
+all four spectra — because `auto` only reaches Newton–Schulz once ‖K‖_F < 0.5,
+by which point its `rel_off²` target is already tight.
+
+**`gemm` + BC is now the fastest configuration**, having been the slowest:
+28.9–29.7× LAPACK against `auto` + BC's 30.1–36.5×, and 47× before this fix.
+134 tests pass, 3 new — including one pinning `_ns_target` directly so the
+early-loose/late-tight behaviour cannot silently regress.

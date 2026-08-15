@@ -209,19 +209,42 @@ def _power_iter_norm_antisym(K, v0=None, iters: int = 25):
 
 
 _BLOCK_NS_FLOOR = 0.1  # Newton-Schulz target floor, as a fraction of tol
+# How much margin to leave when predicting convergence, as a multiple of tol.
+# Measured across 1e6/1e9/1e12 on cold GOE and on warm starts: 1e9 is fastest
+# on both counts. Too thin (1e6) and a warm start beginning at rel_off ~3e-6
+# never tightens at all, costing it a whole sweep; too wide (1e12) and cold
+# solves tighten from the first sweep, giving back the saving. Tightening one
+# sweep early is cheap -- a few Newton-Schulz iterations -- while tightening
+# one sweep late costs an entire extra sweep, so the optimum sits wide.
+_NS_TIGHTEN_MARGIN = 1e9
 
 
-def _ns_target(target: float, block_m: int, tol: float) -> float:
-    """Newton-Schulz orthogonality target, floored when SSJ-BC is active.
+def _ns_target(target: float, block_m: int, tol: float,
+               rel_off: float, prev_rel: float) -> float:
+    """Newton-Schulz orthogonality target, tightened near convergence.
 
     The plain targets (rel_off^2, or gemm_ns_factor * rel_off) are calibrated
     for the gradual quadratic tail of the unpreconditioned map. With a block
     pass the error can fall four to six orders in ONE sweep, so the target is
     no longer below the NEXT error and the leftover orthogonality defect
-    survives into the answer -- silently costing 2-3 digits. An acceleration
-    can break a downstream tolerance; this floors it at a fraction of tol.
+    survives into the answer. Measured on a 1e-9 cluster with method="gemm":
+    eigenvalue error 2.9e-15 with the floor against 4.5e-13 without, and
+    orthogonality 9.5e-15 against 4.8e-12 -- the 2-3 digits this guards.
+
+    But the defect only has to be small on the LAST sweep. The product-form
+    retraction re-measures X's accumulated defect inside Y^H Y every sweep, so
+    a loose defect earlier is corrected later; demanding 0.1*tol from the first
+    sweep, when rel_off is still O(1), just buys Newton-Schulz iterations
+    nobody needs. So predict the next error from the contraction just observed
+    and tighten only when convergence is in reach. Measured: this is what makes
+    method="gemm" usable with a block pass at all (n=1200, 9219 -> 6470 ms).
     """
-    return min(target, _BLOCK_NS_FLOOR * tol) if block_m else target
+    if not block_m:
+        return target
+    factor = rel_off / prev_rel if prev_rel > 0.0 else 1.0
+    if rel_off * factor <= tol * _NS_TIGHTEN_MARGIN:
+        return min(target, _BLOCK_NS_FLOOR * tol)
+    return target
 
 
 def _block_pass(B, X, m: int, offset: int):
@@ -455,6 +478,7 @@ def ssj_eigh(
     converged = False
     sweeps = 0
     pow_v = None  # warm-started power-iteration vector ("gemm" method)
+    prev_rel = 0.0  # previous sweep's rel_off, for the Newton-Schulz target
 
     for _ in range(max_sweeps):
         B = X.conj().T @ (A @ X)
@@ -499,7 +523,7 @@ def ssj_eigh(
                 # factorization; the stagnation guard floors an unreachably
                 # tight target at roundoff.
                 X, _ = _orth_ns_adaptive(Y, target=_ns_target(
-                    rel_off * rel_off, block_m, tol))
+                    rel_off * rel_off, block_m, tol, rel_off, prev_rel))
             else:
                 X = _orth_qr(Y) if method == "auto" else _orth_cholqr2(Y)
         elif method == "gemm":
@@ -518,10 +542,11 @@ def ssj_eigh(
             if sigma_c > 0.1:
                 Y = Y / (1.0 + sigma_c * sigma_c) ** 0.25
             X, ns_gemms = _orth_ns_adaptive(Y, target=_ns_target(
-                gemm_ns_factor * rel_off, block_m, tol))
+                gemm_ns_factor * rel_off, block_m, tol, rel_off, prev_rel))
             gemms += ns_gemms
         else:
             raise ValueError(f"unknown method {method!r}")
+        prev_rel = rel_off
         sweeps += 1
     else:
         B = X.conj().T @ (A @ X)

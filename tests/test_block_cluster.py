@@ -205,6 +205,33 @@ def test_block_m_capped_below_problem_size():
     assert_accurate(A, w, V)
 
 
+def test_gemm_on_tight_cluster_keeps_digits():
+    """The one combination where the Newton-Schulz target is load-bearing.
+    Without any tightening this measures 4.5e-13 eigenvalue error and 4.8e-12
+    orthogonality; the predictive rule holds it two orders better, at the cost
+    of not matching the always-on floor's 2.9e-15. Pin the trade-off so a
+    future change to _ns_target has to face it."""
+    A = clustered(200, gap=1e-9)
+    w, V, info = ssj_eigh(A, method="gemm", block_m=32, return_info=True)
+    assert info["converged"]
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-13
+    assert np.linalg.norm(V.T @ V - np.eye(200)) < 1e-11
+
+
+def test_ns_tightening_is_off_early():
+    """The target must stay loose while the error is still large -- that is
+    the whole saving. Directly exercises _ns_target rather than inferring it."""
+    from ssj.core import _ns_target
+    tol = 1e-13
+    # early: rel_off O(1), previous sweep contracted by 10x
+    assert _ns_target(0.05, 32, tol, 1.0, 10.0) == 0.05
+    # late: next sweep predicted at/below tol -> tighten
+    assert _ns_target(0.05, 32, tol, 1e-12, 1e-6) == pytest.approx(0.1 * tol)
+    # block_m = 0 must never tighten
+    assert _ns_target(0.05, 0, tol, 1e-14, 1e-6) == 0.05
+
+
 def test_ns_target_floor_preserves_digits():
     """The block pass can drop the error several orders in one sweep, so an
     unfloored Newton-Schulz target silently loses digits. Tightening tol must
