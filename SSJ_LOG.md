@@ -6,42 +6,39 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #11)*
+*(rewritten each tick; as of attempt #13)*
 
 **Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
-saturation. **The solve is two phases** — a self-accelerating globalization
-(cost concentrates where diagonal spread is smallest; injectable via the
-block schedule, #9) and a post-cliff endgame that needs no manifold (IPT,
-#8). **The merge is irreducibly global** (#10): angles localize in sorted
-order but couplings do not, and work scales with coupling mass — rotation
-mass ≠ annihilation work. The dense map and its QR are the price of global
-annihilation; nothing local, cheaper, or differently-saturated survives
-measurement (#7, #10).
+saturation. **Two phases**: self-accelerating globalization (spread-limited,
+injectable — the schedule, #9) and a manifold-free endgame past the cliff
+(IPT, #8). **The merge is irreducibly global** (#10): work scales with
+coupling mass, not rotation mass. **Gains compose by Amdahl** (#11).
 
-**Composition is Amdahl, not multiplication (#11).** Schedule (1.9×), hybrid
-(~1.1×), mixed precision (~1.1×) — historically 1.44× and 1.35× alone —
-compose to 2.33×, not 3.7×, because they all shorten the *same* expensive
-phase. Once the schedule collapses the globalization, mixed precision has
-little left to accelerate on CPU (and fp32 batched `eigh` is only ~1.3× its
-fp64 cost, unlike sgemm's 2×). A further phase-targeted acceleration must
-find cost the others left standing.
+**The floor claim of #11 was challenged and is now corrected (#13).** It
+conflated two gaps. In *flop units* the composed solver is ~30–40
+gemm-equivalents against LAPACK's 8–18 — **the algorithm stands within
+~2–3× of LAPACK**. The other ~6× of the wall ratio is *substrate*, now
+decomposed: numpy's gemm and Gram run AT the flop floor (overhead 1.0×);
+LAPACK QR pays 2.9–3.3× (panel serial fraction on 4 cores — LAPACK-internal,
+unreachable from Python); the B-form pays 1.9× (symmetrize + temporaries);
+the n² maps are memory-bound and already tight after #6. Symmetric BLAS
+(syrk/syr2k) does NOT reclaim it here — scipy's BLAS surface on this box is
+2.6× slower than numpy's `@` (measured control), so the only fast entry
+point has no symmetric kernels. **"Near the floor" means: of this algorithm,
+in this substrate.** On substrates where everything runs at gemm rate (GPU,
+MKL-class CPU), most of the 6× is reclaimable and CholeskyQR2's verdict
+plausibly flips — exactly what the notebook now measures.
 
-**Precision does have a load-bearing boundary (#11):** structure below
-fp32's ~1e-7 resolution — tight clusters, exact ties — is *invisible* to the
-low phase and lands on the fp64 phase unresolved. The mixed schedule
-therefore hands its small tail blocks to the fp64 phase (2 vs 5 sweeps on a
-1e-9 cluster, 18 vs 32 on 5-fold ties), while the big head blocks belong to
-fp32 only. Phases own schedule *segments*.
+**Method lesson (#13, third instance of the same shape):** never compare
+kernels across library boundaries without a same-library control — scipy-vs-
+numpy BLAS identity was an unexamined assumption, like #2's untested
+defaults and #5/#7's unasserted outputs.
 
-**Where this stands, honestly:** cold dense CPU solve now 16–18× LAPACK
-(from 28–42×), floor mostly irreducible on this axis. The undecided
-questions live elsewhere: (1) **GPU** — every shipped piece is GPU-shaped,
-and the Colab notebook now carries the FULL composition (#12): schedule,
-predictive NS tightening, IPT hybrid with the clean hand-off, mixed
-segments. The one remaining step is running it on a real card; nothing more
-can be learned about the GPU question from this box. (2) **tracking** —
-SSJ's warm start already beats re-solving; the composed solver should
-inherit it, unmeasured.
+**Open, in value order:** (1) the GPU run — fully instrumented, waits on a
+card; (2) tracking — the composed solver's warm-start behaviour is
+unmeasured; (3) era-stale dead-ends — "deferred orthonormalization: no gain"
+was measured in the 25-sweep era; in the 8-sweep composed regime QR is ~50%
+of every sweep and the economics may invert; (4) a convergence proof.
 
 ## What SSJ is, and where the cost sits
 
@@ -205,6 +202,7 @@ the tail-exclusion path fires.
 | 10 | **Is the merge local?** K/B mass vs sorted distance; block-passes-only solver; banded-K map | **decisively no — with the campaign's sharpest mechanism finding.** Angles are local, couplings are not; rotation mass ≠ annihilation work. |
 | 11 | **The full composition: mixed × schedule × hybrid**, plus the fp64-phase block policy it needed | **champion config, 2.33× over plain (16–18× LAPACK) — and gains compose by Amdahl, not multiplication.** |
 | 12 | **Bring the GPU notebook up to the composed solver** (schedule, predictive NS, IPT hybrid, mixed segments) | **shipped and validated** — 50 config × spectrum rows pass on the NumPy path; hybrid runs GOE n=200 in 4 sweeps + 8 gemms. |
+| 13 | **Audit the floor claim**: decompose measured-vs-modelled per component; test symmetric BLAS (syrk/syr2k, BLAS-level CholeskyQR2) | **floor claim corrected — algorithm is ~2–3× LAPACK in flop units; substrate ~6×, not reclaimable from Python on this stack.** scipy/numpy BLAS mismatch caught by control. |
 
 ### 1. SSJ-BC — verified
 
@@ -934,3 +932,58 @@ end-to-end under a NumPy alias with the verdict join matching 6/6 rows.
 
 No solver-repo code changed; this tick ships measurement infrastructure. The
 GPU question is now fully instrumented and waits only for a card.
+
+### 13. The floor audit — what "floor" actually meant
+
+Prompted by a direct challenge to #11's "near its floor" claim. The claim
+conflated an *algorithm* gap with a *substrate* gap, and this tick measured
+the decomposition.
+
+**The corrected accounting.** In flop units (one n³-flop-pair gemm = 1.0) the
+composed solver costs ~30–40 gemm-equivalents against LAPACK `dsyevd`'s 8–18:
+**the algorithm is within ~2–3× of LAPACK.** The wall ratio of 16–18× carries
+an additional ~6× of substrate, decomposed per component (n=800, quiet start;
+the n=1200 rows of this run are load-suspect and excluded):
+
+| component | flops | measured | overhead |
+|---|---|---|---|
+| gram `X.T @ X` (numpy) | 1.00 | 0.98 | **1.0×** |
+| B-form (2 gemms + symmetrize) | 2.00 | 3.88 | 1.9× |
+| `_orth_qr` (LAPACK dgeqrf/dorgqr) | 2.67 | 8.94 | **3.3×** |
+| shipped `_orth_cholqr2` | 6.00 | 26.69 | 4.4× |
+| cholqr2 rebuilt on BLAS (syrk+potrf+trtri) | ~3.7 | 17.95 | 4.9× |
+
+numpy's gemm and Gram are AT the flop floor — nothing to reclaim there. The
+big overheads are LAPACK QR's panel serial fraction (unreachable from Python)
+and the B-form's symmetrize+temporaries (~1 ge/sweep, fused-C territory).
+
+**The symmetric-BLAS hypothesis failed, and the failure was diagnostic.**
+dsyrk "should" cost half a gemm; measured, it cost 1.7× numpy's full gemm.
+The control that explained it: **scipy's `dgemm` itself runs 2.57× slower
+than numpy's `@` on this box** — the two link differently-configured BLAS.
+Within scipy's own library, dsyrk is 0.58× dgemm, i.e. the half-flops promise
+is real — but this stack's only fast BLAS entry point (numpy's `@`) exposes
+no symmetric kernels, so the saving is unreachable from Python here. Without
+that control, the table above would have "refuted" syrk as a kernel; it
+actually measured a packaging accident. Third instance of the same method
+lesson: an unexamined identity assumption (scipy BLAS = numpy BLAS) invisibly
+contaminating a comparison.
+
+**What this settles and un-settles:**
+
+* Settled: on this box, in numpy, the shipped implementation is close to what
+  the substrate permits; further CPU wall gains are not sitting in kernel
+  choice. #11's claim survives *as scoped*: the floor of this algorithm, in
+  this substrate.
+* Un-settled (and now stated in the reflection): the 6× substrate is mostly
+  an artifact of this stack. On a gemm-dominant substrate the flop-unit
+  picture governs — the algorithm at 2–3× LAPACK, CholeskyQR2's #7 verdict
+  plausibly flipping (its flop content is 6.0 all-gemm vs QR's 2.67
+  factorization-shaped) — which is precisely the notebook's question.
+* Also un-settled: "deferred orthonormalization: no gain" dates from the
+  25-cheap-sweeps era. At 8 sweeps with QR at ~50% of each, the economics may
+  invert. Queued as an era-stale dead-end worth one re-measurement.
+
+No solver code changed; scratchpad only. The headline correction — the
+campaign's honest standing is *2–3× LAPACK in flop units*, with the rest
+substrate — is now in the reflection where it can steer.
