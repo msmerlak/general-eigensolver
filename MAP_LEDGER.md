@@ -49,6 +49,7 @@ Incumbents to beat, by regime:
 | 28 | secular equation (rank-one) | scalar root-finding | exact, **no basin at any coupling**, O(n²); crossover ~n=5000 |
 | 29 | Oja / Rayleigh gradient flow | vector gradient | structurally wrong for interior targets |
 | 30 | randomized range finder + IPT | sketch | fails — gives a subspace, IPT needs a frame |
+| 31 | Perron balancing of the gap-weighted coupling graph | positive diagonal; fixed point is a Perron ray | **no-go, proved and verified** — 0 of 15 basin cases changed; ρ(J) is exactly invariant under diagonal similarity (8.5e-16), so no reconditioning can move the basin. By-product screen ρ(\|J\|) is a better classifier (AUC 0.988 vs 0.944) but costs more than the solve it screens |
 
 ## Recurring lesson
 

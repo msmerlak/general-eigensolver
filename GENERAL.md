@@ -1644,6 +1644,82 @@ not yet practically faster.** It is the only thing in this repository with no
 convergence condition at all, which is why it is recorded rather than
 discarded.
 
+---
+
+# A no-go theorem: diagonal reconditioning cannot widen any basin
+
+A natural idea, and one worth killing properly because it will occur to
+anyone: the basin of a divide-by-gap map should depend on the *coordinates*,
+so rescale them. Split $A = D + W$ and apply a diagonal similarity
+$A \mapsto D_s^{-1} A D_s$, which leaves both $\mathrm{spec}(A)$ and
+$\mathrm{diag}(A)$ fixed and moves only the coupling,
+$W_{ik} \mapsto (s_k/s_i)W_{ik}$. Choose $s$ as the Perron vector of the
+gap-weighted coupling graph $B_{ik} = |W_{ik}|/|d_j - d_i|$, since
+$\min_{s>0}\|D_s^{-1}BD_s\|_\infty = \rho(B)$ exactly. The state is a
+*positive diagonal* and the fixed point is a Perron ray — no other map here
+has either.
+
+It does exactly nothing, and the reason is a one-line invariance. The IPT
+column-map Jacobian transforms as $J \mapsto D_s^{-1} J D_s$, so its
+**spectral radius is exactly preserved by every diagonal similarity**.
+Verified directly, independently of the exploring agent: a random positive
+diagonal with $\kappa \sim 10^{2.6}$ leaves $\rho(J)$ unchanged to
+**8.5e-16** (symmetric) and **8.8e-15** (nonsymmetric), while $\|J\|_\infty$
+moves by 15× and 6×. Balancing can only close the gap between $\rho(J)$ and
+$\|J\|_\infty$ — and the basin is governed by $\rho(J)$.
+
+Measured consequence: **0 of 15** basin cases changed outcome. Where IPT
+converged, balancing converged (in modestly fewer iterations); where IPT
+diverged, balancing diverged. It also costs 0.96–1.69× the matvecs and
+returns residuals 50–800× worse (2.8e-14 → 5.3e-12), the price of a
+non-orthogonal transform with $\kappa(D_s) \approx 10^2$–$10^4$.
+
+**So: no diagonal reconditioning of the coordinates — none, at any cost — can
+widen the basin of any divide-by-gap map in this repository.** That closes a
+whole family of would-be fixes, and it is the fourth independent confirmation
+that the divide-by-gap generator's behaviour is intrinsic rather than an
+artifact of how it is written down.
+
+Two things worth keeping from the attempt:
+
+* **$\|J\|_\infty$ is 20–700× larger than $\rho(J)$ on perfectly ordinary
+  near-diagonal matrices that converge in 30 iterations** (69.15 against
+  0.93). This is generic, not pathological — the row weights $1/|d_j-d_i|$
+  blow up for sites adjacent to the target. Every textbook sufficient
+  condition for contraction is therefore off by orders of magnitude on *every*
+  IPT problem, which is why this idea looked like it had so much headroom.
+* **LAPACK's `dgebal` is a no-op on all the non-pathological families**,
+  digit-for-digit identical iteration counts. The repository's implicit
+  assumption that its coordinates are already fine is correct.
+
+## The by-product, and why it still loses: predicting versus observing
+
+The invariant $\rho(|J^{(j)}|)$ is a genuinely better convergence predictor
+than the one-hop $\rho_j$ this repository ships — over 256 dense columns,
+AUC **0.988 against 0.944**, and 80% of the available wins captured at zero
+wasted attempts against 49%. Given that `bench_screen.py` already showed the
+one-hop screen to be a weak classifier, that is a real improvement to the
+weakest link in the dispatcher.
+
+It is still not worth having, and the reason generalizes. Measured here,
+sequentially:
+
+| regime | cost of the ρ(\|J\|) screen |
+|---|---|
+| sparse, n=5,000, k=4 | **191% of the whole solve** |
+| sparse, n=20,000, k=4 | **218%** |
+| sparse, n=20,000, k=32 | **363%** |
+| dense, n=400–1500, k=8 | 7.4 / 13.7 / 51.2 ms — about the same as *attempting* IPT (9.9 / 39.2 / 62.2 ms) |
+
+The screen costs as much as or more than the operation it is screening. And
+this repository has already made attempting cheap: columns retire
+independently, failure is detected in ~40 iterations rather than 763, and the
+outcome is reported per column. **When the outcome is cheaper to observe than
+to predict, the right investment is cheap failure, not better prediction** —
+which is the same conclusion `_auto_gate` reached from the cost side, now
+reached from the accuracy side. A better classifier does not help when
+speculative execution dominates it.
+
 ## The map, for future work
 
 | capability | function | wins against | measured |
