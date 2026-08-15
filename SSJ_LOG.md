@@ -94,4 +94,59 @@ found load-bearing:
 
 | # | attempt | verdict |
 |---|---|---|
-| — | *(none yet)* | |
+| 1 | **SSJ-BC**: block-cluster preconditioner (block-Jacobi pass on sorted-diagonal blocks) + mass-capped angle gate + Newton–Schulz target floor | **real, verified independently — the first genuine improvement.** See below. |
+
+### 1. SSJ-BC — verified
+
+The agent first instrumented *why* the sweep count grows: `diag(B)` must climb
+from spread ‖A‖/√n to the true spectral spread, costing ≈½·log n sweeps, and
+while the spread is small nearly every gap is comparable to every coupling —
+7697 pairs saturate at ±π/4 at n=400 and the contraction rate sits at 0.99.
+The block pass hands the iteration ~√m of that spread for free.
+
+**Reproduced independently against the shipped `ssj_eigh`** (sweeps are
+load-independent; wall measured with the box quiet):
+
+| case | shipped | BC m=32 | BC m=n/8 |
+|---|---|---|---|
+| GOE n=200 | 20 | **9** | 9 |
+| GOE n=400 | 24 | **11** | 10 |
+| GOE n=800 | 29 | **14** | 10 |
+| exact 5-fold degeneracy n=200 | 69 | 25 | 26 |
+| clustered 1e-9 n=200 | 33 | **9** | 9 |
+
+Wall, quiet machine, min-of-3: **1.21× / 1.38× / 1.46×** at m=32 and
+**1.27× / 1.44× / 1.75×** at m ∝ n, for n = 200/400/800 — the margin *grows*
+with n. Residuals 1.2e-15…1.9e-14, orthogonality ≤2.8e-14 throughout.
+
+**The growth flattening is the real result.** Shipped sweeps go 20 → 24 → 29
+over n=200→800; with m ∝ n they go **9 → 10 → 10**. That is the term the
+baseline section flags as mattering most.
+
+**Two corrections to the proposing agent's report**, both found by re-measuring:
+
+* **The degeneracy claim does not reproduce at its stated size.** It reported
+  70 → 8 sweeps (8.75×) on exact 5-fold degeneracy; on my construction I get
+  69 → 25 (2.8×). Still a real gain, and still the largest of any spectrum
+  tested — but a third of the claim. Constructions differ, which is exactly why
+  the number needs restating rather than inheriting.
+* **The shipped defaults are the configuration the agent discarded.**
+  `ssj_bc` defaults to `block_m=16, block_passes=1, part="gap"`, but every
+  measured result used `m=32, passes=2` with *equal-chunk* partitioning — and
+  the report explicitly finds gap-partitioning **worse**. With the defaults the
+  wall gain vanishes entirely (1.02×, 1.00×), which is how I first mismeasured
+  this. Any integration must ship the tested configuration as the default.
+
+**Not yet integrated**, deliberately. It is not a strict win — a tight `X0`
+warm start regresses 2 → 3 sweeps, because the block pass fires on an iterate
+that is already nearly converged. So it belongs behind an option, default off,
+until that case is handled. It also required a companion fix (Newton–Schulz
+target floored at `0.1·tol`); without it the faster convergence outruns a
+tolerance calibrated for the old rate and silently loses 2–3 digits — a good
+reminder that an acceleration can break a downstream tolerance.
+
+**What it is, stated honestly:** a *preconditioner around* SSJ, not a change to
+the map. The generator, the arctan saturation and the symmetric pairing are
+imported unmodified. With m ∝ n it is "SSJ preconditioned by one level of
+block-Jacobi", which the agent says plainly and which should not be described
+as "SSJ got faster". And SSJ remains 24–29× LAPACK even with it.
