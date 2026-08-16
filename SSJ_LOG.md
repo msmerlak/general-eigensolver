@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #31)*
+*(rewritten each tick; as of attempt #32)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 32 | **Can the coarse supplier run at 16 or 8 bits?** (user question) | **fp16 and bf16 both reach 1.1e-15 — once the polish guard is loosened; fp8 cannot (beyond the ladder's hard wall).** The shipped guard is a constant fitted to fp32 and is the only thing blocking 16-bit. But no constant works for fp16 across GOE *and* clusters, so it must become adaptive. |
 | 31 | **Work on SDC** (user) — shift probe, which found a catastrophe instead | **#29's `ns_switch=0.9`, swept on Ginibre alone, made SYMMETRIC input 54× slower than dgeev** (665 iters, 12 failed shifts, fallback). NS's region is in the operator norm; dev is Frobenius/√n. Correct test is ‖I−X²‖_F < 1 = a 1/√n scaling law. **symmetric n=800: 13448 → 422 ms.** |
 | 30 | **Work on SDC** (user) — scaling sweep, then the far-field convergence test | **scaling refuted too (unscaled ≈ determinantal; pre-scale worth 0 iterations), but half a far-field step was a gemm that only tested convergence.** Gate on the Newton update norm: **0.67×/0.73×/0.73× dgeev**, identical iteration counts; Python 207→124 / 748→587 ms. Surfaced a pre-existing silent non-convergence. |
 | 29 | **Cheapen the sign iteration** via the Newton→Newton-Schulz threshold (#28's named target) | **refuted, with the trajectory.** Quadratic convergence crosses the whole disputed band in 1–2 of 16 steps, so there is nothing to reassign; past 1.0 it degrades. 0.9 shipped at noise level (3–5%). Real cost is the 8–11 far-field steps. |
@@ -2213,3 +2214,97 @@ hard matrix — it starves `max_iter` instead, since a regression test that
 depends on something staying broken rots the moment it is fixed.
 
 184 tests pass.
+
+### 32. How low can the coarse supplier go? fp16 and bf16 yes, fp8 no — and a constant is the only thing blocking them
+
+**The question (user):** can the coarse supplier run at 16 or even 8 bits?
+Feasibility is an ACCURACY question, so the CPU can settle it even though only
+a GPU can settle the speed. The binding constraint is the refinement ladder's
+basin, not the gemm.
+
+**First: the recorded basin was measured at a fixed pair count, and it is
+wider than the log has been saying.** Corrupting an exact basis and sweeping
+both corruption and pair count:
+
+```
+ corruption   in resid    2 pairs    3 pairs    6 pairs   12 pairs
+      1e-04    5.9e-05    4.2e-08    1.4e-12    1.0e-15    1.2e-15
+      1e-03    5.9e-04    1.9e-05    1.9e-08    1.3e-15    1.1e-15
+      1e-02    5.9e-03    5.2e-04    5.5e-07    1.0e-15    8.8e-16
+      3e-02    1.8e-02    1.6e-03    6.9e-04    6.9e-04    6.9e-04   <- wall
+```
+
+**More pairs DO extend the basin, up to a hard wall at ~1e-2 corruption.**
+The recorded "converges from ≲1e-3..1e-4, stalls proportionally beyond" was
+true of *two* pairs and read as a property of the ladder. Beyond 3e-2 no
+number of pairs helps — that part is a genuine wall.
+
+**Second, the real finding.** Modelling each format's best possible coarse
+solve as an exact eigendecomposition rounded to that format (no real
+low-precision eigensolver can beat this), the ladder as shipped stalls:
+
+```
+ format   in resid   after ladder (shipped guard 1e-3)
+   fp32    4.5e-08              1.1e-15   works
+   fp16    3.1e-04              6.2e-06   STUCK, and more pairs never help
+   bf16    2.6e-03              2.2e-04   STUCK
+    fp8    4.1e-02              1.9e-02   STUCK
+```
+
+fp16 stalls from an input residual of 3.1e-04 while the sweep above converges
+to 1e-15 from 5.9e-03 — **twenty times larger**. A smaller error that cannot
+be fixed means the obstruction is structural, not magnitude.
+
+**It is `_ipt_polish`'s guard, and the guard is a constant.** The polish zeroes
+its correction wherever |C| = |W/gap| > 1e-3, to protect near-degenerate
+pairs. For GOE n=400 the typical gap is ~1e-2·‖A‖, so fp16 quantization noise
+W ~ 3e-4·‖A‖ gives C ~ 3e-2 — **the guard discards exactly the corrections it
+needs.** fp32 noise gives C ~ 6e-6, comfortably underneath, which is why the
+constant has never been questioned. Sweeping it:
+
+```
+ format   in resid     g=1e-3     g=1e-2     g=1e-1        g=1
+   fp32    4.5e-08    1.1e-15    1.1e-15    1.1e-15    1.1e-15   insensitive
+   fp16    3.1e-04    6.2e-06    1.1e-15    1.0e-15    1.0e-15
+   bf16    2.6e-03    2.2e-04    7.4e-05    1.1e-15    1.1e-15
+    fp8    4.1e-02    1.9e-02    3.0e-03    6.0e-04    3.6e+06   diverges
+```
+
+**fp16 and bf16 both reach full fp64 accuracy — 1.1e-15 — once the guard is
+loosened.** fp32 is completely insensitive to it, which is why this was
+invisible. The threshold needed scales with the coarse error at roughly
+30–40× the input residual (fp32 4.5e-8 / 1e-3; fp16 3.1e-4 / 1e-2; bf16
+2.6e-3 / 1e-1). **Same shape as #31: a magic constant that is really a
+scaling law, fitted to the one regime anyone had tested.**
+
+**fp8 is out, and not because of the guard.** Its best-case coarse residual
+(4.1e-02) sits beyond the ladder's hard wall (~1.8e-02 input), so no guard and
+no pair count reaches fp64 — best observed 6.0e-04, and at guard 1.0 it
+diverges outright. That is a basin limit, not a tuning limit.
+
+**But the guard cannot simply be loosened, and this is why it is not a
+one-line change.** On a spectrum with a 1e-9 cluster the guard is load-bearing
+exactly as designed:
+
+```
+ format    guard   in resid    after x6       dlam
+   fp16    1e-03    3.4e-04     1.0e-15    1.0e-15   tight guard WORKS
+   fp16    1e-01    3.4e-04     2.0e-07    2.0e-07
+   fp16      inf    3.4e-04     1.5e-03    2.2e-03   loose guard BREAKS
+```
+
+So fp16 needs a LOOSE guard on GOE and a TIGHT one on clusters: **no constant
+works for fp16 across both**, which is the real content of the finding. The
+guard is separating noise-induced coupling from genuine near-degeneracy, and
+that boundary moves with the noise floor — so it has to be adaptive on
+something the polish can see. Designing that is the next tick, not this one.
+
+**A non-finding, recorded because I nearly reported it as one.** SP2's rank
+disagrees with #{λ < μ} in 5 of 9 GOE cases, by ±1, with the nearest
+eigenvalue sitting 1e-3..9e-3 from μ — far from roundoff, so not a tie-break
+artifact. It is nevertheless harmless: SP2 converges to whatever integer rank
+the warmup trace rounds to, and a projector of ANY rank onto the lowest-r
+eigenvalues is a valid invariant subspace. The split stays exact; only the
+bisection balance shifts. "Rank wrong" was my comparison being wrong about
+what SP2 promises, for the third time this session that a harness assumption
+masqueraded as a result.
