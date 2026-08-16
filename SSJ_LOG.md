@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #39)*
+*(rewritten each tick; as of attempt #40)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 40 | **Correction** (user supplied the source) | **cuSOLVER DOES have `xgeev`**; `cupy.linalg.eig` → `_geev` → `cusolver.xgeev`, device-resident. My "no geev" claim was stale across #34–#36. **This strengthens #36: the 1.39×/1.13× wins are over a genuine vendor DEVICE kernel.** Also explains xgeev's un-cubic scaling as a young kernel with large fixed cost. |
 | 39 | **Instrument the split accuracy** (user request) | **cause found: an eigenvalue 1.83e-04 from the splitting line at n=1024.** Moving the shift fixes it 25–250×. The retry machinery already existed; the gate was **1e-6, with 25892× to 17-MILLION× headroom — it had never fired.** Shipped `gate=1e-11`: 99× better accuracy at n=1024, 2.5× sign cost there only, nothing changes at n≤512. |
 | 38 | **Device-leaf run** (user ran it) | prediction held in DIRECTION (loses at 1024), off 8–15% in magnitude. Best SDC: **1.39× / 1.15× / 0.79×** vs `cupy.linalg.eig`. **The win is confirmed CPU-bound** — at n=256 a 128×128 device eig costs 54.1 ms against a host round trip's 15.1. Crossover measured at 384–512 (`LEAF_DEVICE_MIN` 384→450). Accuracy loss localized to the SPLIT: all four leaf strategies give identical 4.2e-11. |
 | 37 | **Solve leaves on the device** (user request) | `leaf_solver` gains `device`/`auto`; SDC becomes a PRECONDITIONER for `cupy.linalg.eig`. Crossover measured between 256 and 512, and 3n/5 puts leaves right on it. **Prediction recorded: preconditioning loses narrowly at n=1024** (~868 vs 790 ms) because `eig` scales 3.07× not 8× from 512→1024. |
@@ -2422,11 +2423,13 @@ gemms could run in fp32 — untested).
 to cuSOLVER's `syevd` at 5.4 gemm-equivalents. On CPU, `dgeev` costs **131–181
 gemm-equivalents against `dsyevd`'s 17–25** — the nonsymmetric incumbent is
 ~7× weaker in exactly the unit that decided the symmetric race, and SDC has
-op-count *parity* with it (88 vs 89). On top of that, cuSOLVER appears to
-provide no general nonsymmetric eigensolver at all (`syevd`/`syevj`/`sygvd`
-and the SVDs, but no `geev`). **The notebook tests that rather than assuming
-it**, because it changes what the comparison means: with no device solver, the
-honest baseline is a host round trip with transfers included.
+op-count *parity* with it (88 vs 89). I also expected cuSOLVER to provide no
+general nonsymmetric eigensolver at all — `syevd`/`syevj`/`sygvd` and the
+SVDs, but no `geev`. **The notebook tests that rather than assuming it**, and
+that was the right call: the claim is STALE and #40 records the correction —
+cuSOLVER has gained `xgeev`, and `cupy.linalg.eig` calls it on the device.
+The host round trip is retained as a reference (it bounds what you pay by
+keeping the problem on the CPU), but it is not the incumbent.
 
 **Two port changes, both forced by the substrate and both interesting.**
 
@@ -2784,3 +2787,39 @@ never going to be subtle.
 **Follow-up, named and not done:** `csrc/sdc_eig.c` carries the same 1e-6 gate.
 Changing it would invalidate #27/#28/#31's timing numbers, so it is flagged
 rather than changed blind — the C port needs its own accuracy instrument first.
+
+### 40. Correction: cuSOLVER *does* have a general eigensolver, and it strengthens #36
+
+**Source, supplied by the user and read directly:**
+`cupy/linalg/_eigenvalue.py` — `cupy.linalg.eig` delegates to `_geev`, which
+calls **`cusolver.xgeev`** on the device. No host transfer, no NumPy fallback.
+
+**So my claim was stale, not merely unverified.** I asserted across #34, #35
+and #36 that cuSOLVER provides `syevd`/`syevj`/`sygvd` and the SVDs but no
+`geev`. That was true of older CUDA; `cusolverDnXgeev` exists now and CuPy 14
+exposes it. Corrected in place at the source in #34 and in the notebook's
+framing.
+
+**This makes #36's headline stronger, not weaker.** SDC's **1.39× at n=256 and
+1.13× at n=512** are wins over a genuine vendor DEVICE kernel, not over a
+wrapped CPU solve. That was the reading I flagged as needing verification
+before anyone relied on it, and it is the one that survived.
+
+**It also resolves an anomaly rather than leaving it dangling.** `xgeev`'s very
+un-cubic scaling — 128 → 768 is 6× in size but only 8.4× in time, with a 54 ms
+floor on a 128×128 problem — is now explained as a young device kernel with
+large fixed cost, not as transfer overhead. That is consistent with it LOSING
+to a host round trip below m ≈ 450 and winning comfortably above, which is
+exactly the crossover #38 measured and `LEAF_DEVICE_MIN = 450` encodes.
+
+**What does NOT change.** #38's finding that the n=256 win is CPU-bound stands
+independently: `leaf=host` (63.0 ms) beats `leaf=device` (116.1 ms) there
+because a 128×128 `xgeev` costs 54.1 ms against a host round trip's 15.1 ms.
+A real device kernel that is slow at small sizes is still slow at small sizes.
+
+**Sixteenth measurement lesson, and it is about knowledge rather than
+instruments.** I stated this three times, hedged it once, and was only saved
+by having written the check into the cell instead of the prose. **A claim about
+what a fast-moving library does not provide has a shelf life**, and mine had
+expired. The habit that worked was making the notebook test it at runtime;
+the habit that failed was repeating it in write-ups as though it were settled.
