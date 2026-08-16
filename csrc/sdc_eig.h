@@ -46,8 +46,10 @@ int matrix_sign_bench(const double *A, int64_t n, double shift, sdc_stats *st);
 
 /* Threshold on ||X^2 - I||_F/sqrt(n) below which the sign iteration hands off
  * from scaled Newton to Newton-Schulz. Exposed so it can be swept rather than
- * asserted: a Newton step (gemm + dgetrf + dgetri) and an NS step (two gemms)
- * cost about the same 4n^3, but only NS is pure gemm. Default 0.6. */
+ * asserted. Default 0.9, and NOT a lever: the iteration converges
+ * quadratically and crosses the whole disputed band in 1-2 of 16 steps, so
+ * there is nothing to reassign wherever it sits (SSJ_LOG #29). The 0.6 -> 0.9
+ * move is worth 3-5%, inside this box's contamination band. */
 void sdc_set_ns_switch(double v);
 double sdc_get_ns_switch(void);
 
