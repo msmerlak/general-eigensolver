@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #33)*
+*(rewritten each tick; as of attempt #34)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 34 | **Port SDC into the GPU notebook** (user request) | cells 10–11 added, validated on the NumPy path (7.9e-15..1.0e-11 across Ginibre/planted/near-sym/companion). Two forced changes: randomized range-finder for the split basis (no pivoted QR on device), and a leaf choice — host round trip vs recurse-to-2×2 — because **cuSOLVER appears to have no `geev` at all**. |
 | 33 | **The GPU run, on a T4** (user ran it) | **the all-gemm thesis FAILS here: cuSOLVER costs 15.3→6.9→5.4 gemm-equivalents, FEWER than CPU dsyevd's 8-18 and falling with n.** The ladder's premise held (fp32 eigh 3.3-3.9× cheaper) and it still lost: at n=2048 the whole fp64 solve is 5.4 gemms, so not one 5-gemm pair fits. Caveat: a crippled-fp64 die deflates every gemm-eq count. |
 | 32 | **Can the coarse supplier run at 16 or 8 bits?** (user question) | **fp16 and bf16 both reach 1.1e-15 — once the polish guard is loosened; fp8 cannot (beyond the ladder's hard wall).** The shipped guard is a constant fitted to fp32 and is the only thing blocking 16-bit. But no constant works for fp16 across GOE *and* clusters, so it must become adaptive. |
 | 31 | **Work on SDC** (user) — shift probe, which found a catastrophe instead | **#29's `ns_switch=0.9`, swept on Ginibre alone, made SYMMETRIC input 54× slower than dgeev** (665 iters, 12 failed shifts, fallback). NS's region is in the operator norm; dev is Frobenius/√n. Correct test is ‖I−X²‖_F < 1 = a 1/√n scaling law. **symmetric n=800: 13448 → 422 ms.** |
@@ -2378,6 +2379,88 @@ table.
 
 **Verdict.** On a T4 the all-gemm thesis fails and coarse+ladder loses, both
 for the same measurable reason: the incumbent is too cheap in gemm units on
-this die. The experiment that would settle it is unchanged and now much
-better specified — **the same notebook on an A100 or V100**, where the
-question is simply whether cuSOLVER's gemm-equivalent count rises above ~10.
+this die.
+
+**CORRECTION, from arithmetic on the same run.** The paragraph above
+originally recommended rerunning on an A100 and implied the verdict would
+likely flip. That was too generous, and the T4's own numbers say so.
+cuSOLVER's efficiency against gemm RISES with n — 0.15, 0.34, 0.44 of gemm
+rate at n=512/1024/2048 — so its gemm-equivalent count is falling **toward**
+the flop-ratio floor (~2.35 at 4.7n³, or ~4.5 on the higher 9n³ count), not
+away from it. That is an implementation-quality fact, not a T4 artifact.
+
+And a uniform fp64 speedup CANCELS: both `t_eigh64` and `t_gemm64` are fp64
+work, so an 82×-faster A100 leaves the ratio unchanged. Only a differential
+helps, and the one that exists — cuBLAS `dgemm` on fp64 tensor cores (19.5 TF)
+against syevd's non-gemm panels (9.7 TF) — buys at most 2×:
+
+```
+    n   gemm-eq now   if gemm 2x faster   ladder pairs affordable
+  512          15.3                30.5                      4.52
+ 1024           6.9                13.9                      2.07
+ 2048           5.4                10.7                      1.50
+```
+
+The ladder needs **3 pairs** (2 gave 1.1e-10 at n=512, failing the bar). So
+even the most favourable A100 differential gives a win at n=512, a coin flip
+at 1024, and a **loss at 2048**. The deeper problem is a trend, not a
+substrate: the ladder costs a FIXED ~5 gemms per pair while the incumbent's
+cost in gemm units falls with n. That is a losing race asymptotically on any
+hardware. What would change it is a much cheaper coarse supplier (fp16/bf16
+tensor cores are a 16× differential, and #32 showed both reach 1.1e-15 once
+the polish guard is fixed) or a cheaper pair (the correction is O(err), so its
+gemms could run in fp32 — untested).
+
+### 34. SDC ported to the notebook — and the nonsymmetric side may have no incumbent at all
+
+**Why this is a different contest, in one number.** The symmetric race was lost
+to cuSOLVER's `syevd` at 5.4 gemm-equivalents. On CPU, `dgeev` costs **131–181
+gemm-equivalents against `dsyevd`'s 17–25** — the nonsymmetric incumbent is
+~7× weaker in exactly the unit that decided the symmetric race, and SDC has
+op-count *parity* with it (88 vs 89). On top of that, cuSOLVER appears to
+provide no general nonsymmetric eigensolver at all (`syevd`/`syevj`/`sygvd`
+and the SVDs, but no `geev`). **The notebook tests that rather than assuming
+it**, because it changes what the comparison means: with no device solver, the
+honest baseline is a host round trip with transfers included.
+
+**Two port changes, both forced by the substrate and both interesting.**
+
+*The split basis.* CuPy's `qr` has no pivoting, so the pivoted-QR extraction
+of range(P) is replaced by the randomized range-finder already validated in
+the purification family: `QR([P G1, (I−P) G2])`, one unpivoted QR. Column
+ORDER is load-bearing — #24 records building the basis from a pivoted QR of
+`[P, I−P]`, whose reordering destroys the range separation and reported a
+bogus ‖A21‖ = 2.6e-01 on a symmetric matrix.
+
+*The leaf, which is the real question.* With no device `geev` the CPU default
+(one split, halves to dgeev) is not available unmodified, so the port offers
+both and the cell measures them: `leaf_solver="host"` (one split, leaves
+copied to the CPU) against `leaf_solver="deep"` (recurse to 2×2, closed form,
+never leave the device). **#25 measured deep recursion 4× SLOWER on CPU — but
+that verdict assumed a cheap leaf solver existed, which is precisely what this
+substrate removes.** Deep recursion is also cheaper than it looks: level k
+holds 2^k blocks of size n/2^k, so the sign work sums to ~4/3 of the top-level
+split. What it really costs is kernel launches on small blocks, which is #17's
+leaf lesson in GPU form.
+
+**Validated on the NumPy path** against the repository's `sdc_eigvals`, across
+Ginibre, planted-real, near-symmetric and companion matrices at n = 128 and
+256. Both strategies are accurate; "deep" costs 63–145 splits against "host"'s
+1, which is exactly the trade the device is expected to invert:
+
+```
+case                  n   port host   port deep       repo   splits h/d
+Ginibre             256     3.7e-14     1.4e-12    4.4e-14      1/133
+planted real        256     3.8e-14     9.9e-14    1.4e-14      1/127
+near-symmetric      256     1.6e-14     9.1e-14    1.4e-14      1/145
+companion           256     3.4e-12     1.0e-11    1.9e-13      1/108
+```
+
+The sign iteration carries both CPU findings forward: the Frobenius handoff
+bound of #31 (a 1/√n scaling law, not a constant — the fixed threshold made
+symmetric input 54× slower than dgeev) and the far-field gate of #30 (the
+convergence-test gemm is skipped while the update norm says we are far).
+
+Not yet run on a card. The cell prints the host round trip's cost in
+gemm-equivalents first, because that single number decides the race: SDC needs
+~88, so it wins only if the round trip costs more than that.
