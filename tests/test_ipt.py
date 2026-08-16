@@ -5,9 +5,11 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-from ssj import ipt_eigh, ipt_eig, refine_eig, ssj_ipt_eigh  # noqa: E402
+from ssj import (ipt_eigh, ipt_eig, ipt_eig_partial, ipt_hybrid_eigh,  # noqa: E402
+                 ipt_rate_columns, refine_eig, ssj_ipt_eigh)
 from ssj.ipt import ipt_rate  # noqa: E402
 
 
@@ -245,3 +247,137 @@ def test_hybrid_falls_back_to_ssj_on_exact_ties():
     nrm = np.linalg.norm(A, 2)
     assert info["path"] == "ssj"
     assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+
+
+# --------------------------------------------------------------------------
+# ipt_rate_columns fast path, and the column-split hybrid.
+# --------------------------------------------------------------------------
+
+def _clustered(n, k, eps=3e-4, gap=1e-7, seed=0):
+    """Well-separated diagonal carrying one tight k-cluster: the global IPT
+    rate is huge, but only ~k columns are actually resonant."""
+    r = np.random.default_rng(seed)
+    d = np.arange(n, dtype=float)
+    d[n // 2:n // 2 + k] = d[n // 2] + gap * np.arange(k)
+    W = r.standard_normal((n, n))
+    W = (W + W.T) / 2
+    return np.diag(d) + eps * W
+
+
+def _rate_columns_reference(A, cols):
+    """The per-column loop the vectorized path replaced, kept verbatim as an
+    oracle. The shipped fast path must agree with it BIT for bit -- it is not
+    an approximation, it is the same expression evaluated in blocks."""
+    A = np.asarray(A)
+    d = np.diag(A)
+    out = np.empty(len(cols))
+    for j, c in enumerate(cols):
+        gap = np.abs(d[c] - d)
+        w = np.abs(A[:, c])
+        mask = np.arange(A.shape[0]) != c
+        g = gap[mask]
+        with np.errstate(divide="ignore", invalid="ignore"):
+            r = np.where(g > 0, w[mask] / np.where(g > 0, g, 1.0), np.inf)
+        out[j] = float(np.max(r))
+    return out
+
+
+@pytest.mark.parametrize("n", [7, 64, 200])
+def test_rate_columns_fast_path_is_bit_identical(n):
+    rng = np.random.default_rng(11)
+    A = rng.standard_normal((n, n))
+    A = (A + A.T) / np.sqrt(2 * n)
+    for cols in (np.arange(n), np.arange(n)[::7], np.array([0]),
+                 np.array([n - 1, 0, n // 2])):
+        got = ipt_rate_columns(A, cols)
+        want = _rate_columns_reference(A, cols)
+        assert np.array_equal(got, want), (n, len(cols))
+
+
+def test_rate_columns_fast_path_handles_exact_degeneracy():
+    """gap == 0 must give +inf (divergent), and 0/0 must too -- the blocked
+    form gets there through IEEE rather than np.where, so pin the behaviour."""
+    A = np.diag([1.0, 1.0, 5.0])
+    A[0, 1] = A[1, 0] = 0.3            # degenerate pair, coupled
+    r = ipt_rate_columns(A, np.arange(3))
+    assert np.isinf(r[0]) and np.isinf(r[1])
+    assert np.isfinite(r[2])
+    assert np.array_equal(r, _rate_columns_reference(A, np.arange(3)))
+
+    Z = np.diag([2.0, 2.0, 9.0])       # degenerate pair, UNcoupled: 0/0
+    r = ipt_rate_columns(Z, np.arange(3))
+    assert np.array_equal(r, _rate_columns_reference(Z, np.arange(3)))
+
+
+def test_rate_columns_empty():
+    A = np.diag([1.0, 2.0, 3.0])
+    assert ipt_rate_columns(A, np.array([], dtype=int)).shape == (0,)
+
+
+@pytest.mark.parametrize("n,k", [(200, 5), (300, 20)])
+def test_hybrid_solves_what_global_ipt_cannot(n, k):
+    """The whole point: a tight cluster disqualifies IPT globally, but only k
+    columns are actually resonant, and the map is column-separable."""
+    A = _clustered(n, k, seed=1)
+    assert ipt_rate(A) > 1.0, "test matrix is not outside the global basin"
+
+    w, V, info = ipt_hybrid_eigh(A, return_info=True)
+    nrm = np.linalg.norm(A, 2)
+    wref = np.linalg.eigvalsh(A)
+    assert np.max(np.abs(w - wref)) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-11
+    assert np.linalg.norm(V.T @ V - np.eye(n)) < 1e-9
+    assert info["n_dense"] >= k          # the cluster went to the dense block
+    assert info["n_ipt"] > n - 4 * k     # and almost everything else did not
+
+
+def test_hybrid_matches_plain_ipt_when_the_whole_matrix_is_admissible():
+    """With no cluster, every column passes the screen and the hybrid must
+    degenerate to plain IPT rather than paying for a dense block."""
+    rng = np.random.default_rng(4)
+    n = 120
+    A = np.diag(np.arange(n, dtype=float))
+    W = rng.standard_normal((n, n))
+    A = A + 1e-3 * (W + W.T) / 2
+    w, V, info = ipt_hybrid_eigh(A, return_info=True)
+    assert info["n_dense"] == 0
+    wref = np.linalg.eigvalsh(A)
+    assert np.max(np.abs(w - wref)) / np.linalg.norm(A, 2) < 1e-12
+
+
+def test_hybrid_falls_through_to_dense_when_nothing_is_separated():
+    rng = np.random.default_rng(5)
+    A = rng.standard_normal((60, 60))
+    A = (A + A.T) / 2                    # dense GOE: no column is separated
+    w, V, info = ipt_hybrid_eigh(A, return_info=True)
+    assert info["path"] == "dense"
+    assert np.allclose(w, np.linalg.eigvalsh(A))
+
+
+def test_per_column_convergence_is_not_a_complete_basis():
+    """Column separability makes the partial solve exact -- and is also why two
+    columns can converge to the SAME eigenpair with nothing to stop them. Both
+    report tiny step norms, because per-column convergence says nothing about
+    the basis. This is why the screen cannot be replaced by the solver's own
+    `converged` flag; the hybrid must stay accurate where the unscreened run
+    silently loses rank.
+    """
+    n, k = 1600, 20
+    A = _clustered(n, k, seed=1)
+
+    # unscreened: IPT on every column, trusting only its own convergence flag
+    w_all, V_all, info = ipt_eig_partial(A, np.arange(n), tol=1e-13,
+                                         hermitian=True, return_info=True)
+    conv = info["converged_cols"]
+    Vc = V_all[:, conv]
+    deficiency = int(conv.sum()) - int(np.linalg.matrix_rank(Vc, tol=1e-8))
+    assert deficiency > 0, (
+        "expected at least one pair of converged columns to collapse onto the "
+        "same eigenpair; if this stops happening the screen's rationale needs "
+        "re-measuring, not the assertion relaxing")
+
+    # the shipped hybrid screens first, and is unaffected
+    w, V, hinfo = ipt_hybrid_eigh(A, return_info=True)
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(w - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.linalg.norm(V.T @ V - np.eye(n)) < 1e-9

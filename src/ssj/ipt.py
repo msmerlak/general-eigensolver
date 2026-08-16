@@ -43,7 +43,7 @@ import numpy as np
 from .core import _am, _orth_qr, off_frobenius, ssj_eigh
 
 __all__ = ["ipt_eigh", "ipt_eig", "ipt_eig_partial", "ipt_rate",
-           "ipt_rate_columns", "ssj_ipt_eigh", "refine_eig"]
+           "ipt_rate_columns", "ipt_hybrid_eigh", "ssj_ipt_eigh", "refine_eig"]
 
 
 def _ipt_iterate(W, d, V, max_iter, tol, norm_A, divergence_factor=1e3,
@@ -661,6 +661,43 @@ def ipt_rate_columns(A, cols):
     xp = _am(A)
     A = xp.asarray(A)
     d = xp.diag(A)
+
+    if xp is np:
+        # Blocked vectorization of exactly the expression below. Bit-identical
+        # to the per-column loop on every case tested (dense GOE and clustered
+        # diagonals, full and strided `cols`), and 1.5-4.0x faster because the
+        # loop's cost was never its flops: per column it built gap, w, mask and
+        # two np.where temporaries, then forced a device sync with float().
+        #
+        # The arithmetic leans on IEEE rather than branching. w/gap already
+        # yields +inf for gap == 0 < w, which is the divergent case the loop
+        # spells out with np.where; only 0/0 needs a fixup, and nan -> inf
+        # reproduces the loop's verdict there. The i == j term is removed by
+        # setting its gap to inf, sending the entry to 0.
+        #
+        # blk = 64 measured best at n = 400..1600 and within noise of the best
+        # at 3200; peak memory stays O(n * blk), never O(n^2).
+        blk = 64
+        rates = np.empty(len(cols))
+        ar = np.arange(min(blk, len(cols)))
+        for s in range(0, len(cols), blk):
+            c = cols[s:s + blk]
+            r = np.abs(A[:, c])                    # owned: safe to mutate
+            gap = d[:, None] - d[None, c]
+            np.abs(gap, out=gap)
+            gap[c, ar[:c.size]] = np.inf           # drop the i == j term
+            with np.errstate(divide="ignore", invalid="ignore"):
+                r /= gap
+            # nan -> inf only. posinf must be pinned: nan_to_num's DEFAULT
+            # collapses +inf to 1.8e308, which would silently turn an exactly
+            # degenerate, coupled pair -- the divergent case this screen exists
+            # to catch -- into a large finite rate that passes any gate.
+            np.nan_to_num(r, copy=False, nan=np.inf, posinf=np.inf)
+            rates[s:s + blk] = r.max(axis=0)
+        return rates
+
+    # GPU path keeps the loop: the vectorized form above is untested on cupy
+    # and this campaign does not ship unmeasured kernels (SSJ_LOG #7).
     rates = xp.empty(len(cols))
     for j, c in enumerate(cols):
         gap = xp.abs(d[c] - d)
@@ -671,3 +708,96 @@ def ipt_rate_columns(A, cols):
             r = xp.where(g > 0, w[mask] / xp.where(g > 0, g, 1.0), np.inf)
         rates[j] = float(xp.max(r))
     return rates
+
+
+def ipt_hybrid_eigh(A, gate=0.1, tol=1e-13, seed=0x5D1, return_info=False):
+    """Full symmetric spectrum: IPT on the separated columns, a dense solve on
+    the resonant remainder.
+
+    The problem this solves. IPT's admission test is a global rate,
+    rho = max over ALL pairs of |W_ij| / |d_i - d_j|. That MAX is brittle: one
+    tight cluster of k eigenvalues sends rho to infinity and disqualifies the
+    whole matrix, even when the other n - k columns sit at rho_j ~ 1e-3 and
+    would converge in three iterations. The obstruction is the aggregate
+    statistic, not the matrix.
+
+    Why the fix is exact rather than approximate. The IPT map is
+    column-separable -- column j's iteration reads A and column j only, and
+    never any other column. So restricting to a subset S is not deflation,
+    locking, or a projection onto an approximate invariant subspace; it is the
+    same iteration, unchanged, on fewer columns. The remaining |C| directions
+    are recovered by deflating |C| random vectors against the converged S
+    eigenvectors (orthogonal to them, A being symmetric), then solving the
+    |C|-by-|C| projected block densely. Cost beyond IPT is O(n^2 |C|), which
+    is negligible exactly when plain IPT fails: k small.
+
+    Measured. On a well-separated diagonal carrying one tight k-cluster, where
+    the global rate reaches 8.4 to 122 and plain ipt_eigh returns eigenvalue
+    errors of 3e-05 to 1e-02, this reaches 1.1e-15 to 2.3e-15. Speed against
+    dsyevd is a wash (0.94x to 1.04x): removing k of n columns from IPT saves
+    k/n of IPT's cost, so the composition inherits IPT's economics rather than
+    improving them. The win here is admission, not throughput.
+
+    WHY THE SCREEN IS NOT AN OPTIMIZATION. Column separability -- the property
+    that makes the restriction exact -- is the same property that lets two
+    columns converge to the SAME eigenpair, since nothing couples them. Both
+    then report tiny step norms and are marked converged, because per-column
+    convergence is a statement about one column's residual and never about the
+    basis being complete. Measured at n=1600 with a 20-cluster: running IPT on
+    all n columns left 1582 flagged converged with rank 1581 -- columns 800 and
+    801 returned the identical eigenvector to |<v_j,v_p>| = 1.000000 and the
+    identical eigenvalue to 12 digits. Both had rho_j >> 1 and are rejected by
+    the screen. Do not replace the screen with the solver's own `converged`
+    flag; it cannot see this failure by construction.
+
+    `gate` is deliberately below the naive basin: rho_j is a one-hop,
+    OPTIMISTIC heuristic (see ipt_rate_columns). Columns that pass it and still
+    fail are folded into the dense block, so the screen only has to be roughly
+    right, not conservative.
+
+    Returns (w, V) ascending, or (w, V, info) when return_info.
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    cols = np.arange(n)
+    rho = ipt_rate_columns(A, cols)
+    S, C = cols[rho < gate], cols[rho >= gate]
+    info = {"n_ipt": int(S.size), "n_dense": int(C.size)}
+
+    if S.size == 0:                                # nothing worth iterating
+        w, V = np.linalg.eigh(A)
+        info.update(path="dense", ipt_iters=0)
+        return (w, V, info) if return_info else (w, V)
+
+    wS, VS, i1 = ipt_eig_partial(A, S, tol=tol, hermitian=True,
+                                 return_info=True)
+    info["ipt_iters"] = i1.get("iters", -1)
+    bad = i1.get("failed", None)
+    if bad is not None and len(bad):               # screen was optimistic
+        bad = np.asarray(bad, dtype=int)
+        C = np.sort(np.concatenate([C, S[bad]]))
+        keep = np.setdiff1d(np.arange(S.size), bad)
+        S, wS, VS = S[keep], wS[keep], VS[:, keep]
+        info["n_ipt"], info["n_dense"] = int(S.size), int(C.size)
+    info["refolded"] = int(0 if bad is None else len(bad))
+
+    VS = VS / np.linalg.norm(VS, axis=0, keepdims=True)
+    if C.size:
+        # (I - VS VS^T) applied to |C| random directions, formed as
+        # VS @ (VS^T @ G) -- two thin gemms, never an n-by-n projector.
+        G = np.random.default_rng(seed).standard_normal((n, C.size))
+        Y = G - VS @ (VS.T @ G)
+        Y = Y - VS @ (VS.T @ Y)                    # one reorthogonalization
+        QC = np.linalg.qr(Y)[0]
+        BC = QC.T @ (A @ QC)
+        BC = (BC + BC.T) / 2.0
+        wC, VCsmall = np.linalg.eigh(BC)
+        w = np.concatenate([wS, wC])
+        V = np.hstack([VS, QC @ VCsmall])
+    else:
+        w, V = wS, VS
+
+    order = np.argsort(w, kind="stable")
+    info["path"] = "hybrid"
+    w, V = w[order], V[:, order]
+    return (w, V, info) if return_info else (w, V)

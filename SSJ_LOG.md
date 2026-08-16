@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #25)*
+*(rewritten each tick; as of attempt #26)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -100,6 +100,32 @@ still wins if the arithmetic is gemms — is **true in the ledger and false at
 the wall**, pending that one function. The leaf lesson of #17 did transfer:
 one split (leaf = n/2) beats recursing to 2x2 by **4x** with equal accuracy,
 now the shipped default.
+
+**A gate that is a MAX is a statistic, not a property of the matrix (#26).**
+IPT's admission test is `rho = max` over ALL pairs, so one tight k-cluster
+disqualifies a whole matrix whose other n − k columns sit at `rho_j ~ 1e-3`.
+Because the IPT map is column-separable, restricting it to the admissible
+columns is not deflation or locking — it is the same iteration on fewer
+columns, exact by construction — and the resonant remainder goes to a dense
+solve on a deflated |C|-dimensional basis. Measured 1.3e-15–8.6e-15 where
+plain `ipt_eigh` fails at 7e-07–1e-04. But the speed is **parity** (0.97–1.08×
+dsyevd), and structurally so: dropping k of n columns saves k/n of IPT's cost.
+**The column split buys ADMISSION, not throughput.** That generalizes past IPT
+— every basin-limited method here is gated by an aggregate, and the aggregate
+is almost always a max over pairs.
+
+**And separability cuts both ways, which is the sharper half.** The property
+that makes the restriction exact is the same one that lets two columns
+converge to the SAME eigenpair, since nothing couples them: measured at
+n=1600, 1582 columns flagged *converged* with rank 1581, two of them returning
+the identical eigenvector to |⟨v_j,v_p⟩| = 1.000000. The flags are honest —
+each vector really is a fixed point of its own column's map. **Per-column
+convergence is a statement about one column's residual and certifies nothing
+about the basis being complete**, so the cheap `rho_j` screen is not an
+optimization that could be replaced by the solver's own convergence flag; it
+is the only thing standing between a column-separable method and a silently
+rank-deficient answer. Same shape as #15's verdict that off(B) in a skewed
+frame certifies nothing: *a local residual is not a global certificate.*
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -289,6 +315,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 26 | **Can IPT run on the separated eigenvalues while another algorithm takes the rest?** (user question) — column split, shipped as `ipt_hybrid_eigh` | **yes, and exactly: 1.3e-15–8.6e-15 where plain IPT fails at 7e-07–1e-04.** Speed is parity (0.97–1.08×) — the split buys ADMISSION, not throughput. Screen is a SAFETY property: unscreened, two columns converge to the *same* eigenpair. `ipt_rate_columns` vectorized, bit-identical, 2.4–4.6×. |
 
 ### 1. SSJ-BC — verified
 
@@ -1682,3 +1709,88 @@ remaining target: not a search, a single profiling job on `matrix_sign` with
 the discipline the symmetric side already paid for (#21's component profile,
 #23's compiled port). If it recovers even half, SDC reaches parity with dgeev
 in wall as it already has in operations.
+
+### 26. Column-splitting IPT — the gate is a MAX, and the fix is exact
+
+**The question (user).** *Can IPT work on the well-separated eigenvalues while
+other algorithms handle the remaining dimensions?* Yes — and the interesting
+part is that the composition is exact rather than approximate, and that the
+screen it needs turns out to be a safety property rather than an optimization.
+
+**The obstruction is a statistic, not a matrix.** IPT's admission test is a
+global rate, `rho = max` over ALL pairs of `|W_ij| / |d_i - d_j|`. That MAX is
+brittle: one tight cluster of k eigenvalues sends `rho` to infinity and
+disqualifies the entire matrix, while n − k columns sit at `rho_j ~ 1e-3` and
+would converge in three iterations. Nothing is wrong with those columns.
+
+**Why the restriction is exact.** The IPT map is column-separable — column j
+reads A and column j, never any other column — so restricting to a subset S is
+not deflation, locking, or projection onto an approximate invariant subspace.
+It is the same iteration, unchanged, on fewer columns. The repo already had
+the pieces (`ipt_rate_columns`, `ipt_eig_partial`); what was missing was the
+composition. Shipped as `ipt_hybrid_eigh`: screen per column, IPT on
+`{rho_j < gate}`, deflate |C| random vectors against the converged
+eigenvectors, solve the |C|×|C| projected block densely, concatenate.
+
+**Correctness result — decisive.** Well-separated diagonal plus one tight
+k-cluster, global `rho` from 0.87 to 130:
+
+```
+   n   k  rho_glob  |C|   hybrid dlam   plain ipt_eigh
+ 400   5   8.3e+00    5        2.3e-15   FAIL 7e-07
+ 400  20   1.1e+02   20        2.1e-15   FAIL 1e-04
+ 800   5   8.7e-01    5        1.3e-15   FAIL 2e-07
+ 800  20   1.3e+02   20        2.3e-15   FAIL 1e-06
+1600   5   6.1e+00    5        6.2e-15   FAIL 2e-06
+1600  20   1.0e+02   20        8.6e-15   FAIL 1e-05
+```
+
+**Speed result — parity, and the reason is structural.** 0.97×–1.08× dsyevd
+(contamination 0.2–3.8%, accuracy asserted before every timing). Removing k of
+n columns from IPT saves k/n of IPT's cost, so the composition inherits IPT's
+economics and cannot improve them. **The column split buys ADMISSION, not
+throughput** — it converts a hard global gate into a soft per-column one, and
+the throughput still comes from `rho_j` on the columns that pass.
+
+**The finding that matters most, and it is a hazard.** My first instinct was
+to delete the screen: `rho_j` is a one-hop optimistic heuristic predicting
+something `ipt_eig_partial` measures exactly and reports in `info['failed']`,
+so why not run IPT on every column and let it flag its own casualties? Measured
+at n=1600 with a 20-cluster, the unscreened path is 2–3× slower (divergent
+columns burn max_iter) **and wrong**: eigenvalue error 3.7e-07, orthogonality
+defect 2.35. Chased it down rather than backing off, with a stated prediction
+and a stated refutation condition. Confirmed exactly: **1582 columns flagged
+converged, rank 1581 — columns 800 and 801 returned the identical eigenvector
+to |⟨v_j,v_p⟩| = 1.000000 and the identical eigenvalue to 12 digits.**
+
+That is not a bug in the flag. Both vectors genuinely ARE fixed points of their
+own column's map, so both step norms genuinely are tiny. **Column separability
+— the property that makes the partial solve exact — is the same property that
+removes any mechanism preventing two columns from landing on the same
+eigenpair.** Per-column convergence is a statement about one column's residual
+and can say nothing about the basis being complete. Both offenders had
+`rho_j` = 1.30 and 3.67 and are rejected by the screen. Pinned as a test that
+asserts the collapse still happens, so the screen's rationale cannot quietly
+rot.
+
+**A shipped speedup fell out of the profiling.** The component breakdown found
+the overhead was not where I assumed — `ipt_eig_partial` costs only 1.04–1.07×
+the full path, and deflation + QR + projection total under 7 ms at n=1600 —
+but `ipt_rate_columns` was 22–47% of the run. It was a Python loop over
+columns building seven O(n) temporaries and forcing a scalar sync each time;
+its cost was never its flops. Blocked vectorization (blk = 64, chosen over a
+grid; peak memory stays O(n·blk)), **bit-identical to the loop on every case
+tested, 2.4×–4.6× faster**, now the shipped NumPy path. The GPU keeps the loop
+— untested kernels do not ship here (#7).
+
+**Tenth measurement lesson, and this one cost a real bug.** The vectorized
+form leans on IEEE (`w/gap` already yields `+inf` for the divergent case)
+instead of branching, and `np.nan_to_num`'s DEFAULT collapses `+inf` to
+1.8e308. That would silently turn an exactly degenerate coupled pair — the
+divergent case this screen exists to catch — into a large finite rate that
+passes any gate. My four bit-identity checks all passed, because no test
+matrix had an exact degeneracy. **A bit-identity check certifies only the
+inputs it was given; the case a function exists to catch is the one to feed it
+first.** Caught by writing the degeneracy test, not by the benchmark.
+
+179 tests pass.
