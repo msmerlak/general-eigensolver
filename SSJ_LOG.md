@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #14)*
+*(rewritten each tick; as of attempt #15)*
 
 **Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
 saturation. **Two phases**: spread-limited globalization (injectable — the
@@ -34,16 +34,25 @@ in a warm solve), and the schedule's head blocks are gated on rel_off < 0.3
 (state-based, not X0-based: a bad X0 still fires them; a warm start or late
 sweep never pays an n/2 eigh for spread it has).
 
+**The retraction is also the certificate (#15).** Deferring
+orthonormalization — the era-stale "no gain" entry, re-measured at 8-sweep
+economics — is worse than useless: every skip rule costs sweeps (the skewed
+frame's angles are systematically poorer), and on GOE it converges the
+stopping criterion while the answer is wrong by 1e-7, because off(B) in a
+non-orthonormal frame is a congruence residual that certifies nothing. QR
+buys three things at once: the manifold, the saturation's geometry, and the
+meaning of the termination test.
+
 **Method lessons now four of a kind:** untested defaults (#2), unasserted
 outputs (#5/#7), unexamined library identity (#13), and **cross-era number
 reuse** (#14: "expected 8 sweeps" came from the chained prototype, not the
 in-solver path — comparing across code eras manufactured a phantom
 regression).
 
-**Open:** (1) the GPU run — now carrying schedule+hybrid+mixed AND the two
-warm fixes belong in the notebook next sync; tracking is the notebook's
-strongest card and now provably GPU-only; (2) era-stale: deferred
-orthonormalization at 8-sweep economics; (3) a convergence proof.
+**Open:** (1) the GPU run — the notebook needs one small sync (the two #14
+warm fixes) and then everything measurable on this box is done; tracking is
+provably GPU-only; (2) a convergence proof — now the only item on this list
+that is not an engineering task.
 
 ## What SSJ is, and where the cost sits
 
@@ -130,7 +139,7 @@ found load-bearing:
 | generator-space momentum | slows for every β tried (the saturation is what it breaks) |
 | Anderson acceleration | diverges (RESULTS.md, independently reproduced) |
 | second-order retraction | no gain |
-| deferred orthonormalization | no gain |
+| deferred orthonormalization | **actively harmful** (#15, re-measured at 8-sweep economics): every skip rule costs sweeps, and it can terminate "converged" with 1e-7 eigenvalue error — off(B) in a skewed frame certifies nothing |
 | CholeskyQR2 retraction | slower than QR on this CPU BLAS (18.4 gemm-equiv vs 9.2 at n=800) |
 | Cayley retraction (I−K/2)⁻¹(I+K/2) | **does not converge** — n=800 hits the 1000-sweep cap at Δλ 4.8e-2 |
 
@@ -209,6 +218,7 @@ the tail-exclusion path fires.
 | 12 | **Bring the GPU notebook up to the composed solver** (schedule, predictive NS, IPT hybrid, mixed segments) | **shipped and validated** — 50 config × spectrum rows pass on the NumPy path; hybrid runs GOE n=200 in 4 sweeps + 8 gemms. |
 | 13 | **Audit the floor claim**: decompose measured-vs-modelled per component; test symmetric BLAS (syrk/syr2k, BLAS-level CholeskyQR2) | **floor claim corrected — algorithm is ~2–3× LAPACK in flop units; substrate ~6×, not reclaimable from Python on this stack.** scipy/numpy BLAS mismatch caught by control. |
 | 14 | **Tracking**: warm-start crossover chart; schedule-head and entry-QR defects | **the CPU tracking niche is dead — warm never beats LAPACK here** (2.6× at best). Two warm-path fixes shipped; niche relocated to GPU, where the notebook tests it. |
+| 15 | **Re-measure the era-stale dead end**: deferred orthonormalization at 8-sweep economics | **dead end confirmed and upgraded** — it breaks the convergence certificate, not just the speed. The retraction is also the stopping test's meaning. |
 
 ### 1. SSJ-BC — verified
 
@@ -1047,3 +1057,47 @@ from a different code era without re-measuring it.
 
 162 tests pass (2 new: entry-QR guard accuracy both branches; head-gate
 bit-equivalence with tail-only on warm starts).
+
+### 15. Deferred orthonormalization — the economics did not invert
+
+The dead-end entry "deferred orthonormalization: no gain" dated from the
+25-cheap-sweeps era; with QR now ~50% of each of ~8 sweeps, skipping two
+retractions would be worth ~18 gemm-equivalents, so the entry was re-measured
+rather than trusted (the era-stale concern raised in #13).
+
+Harness: the shipped auto path (schedule + head gate + NS floor + endgame)
+with a pluggable skip rule, and — the #14 lesson — an internal baseline in the
+same harness, which reproduces shipped `ssj_eigh` sweep counts exactly
+(7/9/7). Skipped sweeps run `X ← X(I+K)` unretracted; the run ends with one
+exact QR. All load-immune; accuracy asserted.
+
+| rule (GOE n=400) | sweeps | dlam | resid | verdict |
+|---|---|---|---|---|
+| none (baseline) | 7 | 4.0e-15 | 3.3e-15 | — |
+| skip when ‖K‖_F < 0.5 | 14 | **8.3e-07** | 6.8e-05 | FAIL |
+| skip when ‖K‖_F < 0.1 | 8 | 3.9e-14 | **2.7e-08** | FAIL |
+| skip alternate QRs (big-K phase) | 80 (cap) | 2.3e-02 | — | diverges |
+
+(n=800 and the 1e-9 cluster: same shape; the cluster stays accurate but still
+pays 7 → 12 sweeps.)
+
+**Two mechanisms, one of them new to this log:**
+
+1. *The skewed frame slows the map* — every rule cost sweeps even where
+   accuracy survived. The angles computed from a congruence B are
+   systematically poorer than similarity angles.
+2. **The retraction is also the certificate.** The failing runs *terminated
+   on the convergence test*: orthogonality was fine after the final QR
+   (2.4e-14) but eigenvalues were wrong by 1e-7, because `off(B) ≤ tol` was
+   evaluated in a skewed frame where off(B) is a congruence residual and
+   bounds nothing about the similarity. The final QR restores the manifold
+   but cannot retroactively restore the meaning of the test that already
+   fired. Any future skip-the-retraction idea must supply a frame-independent
+   stopping criterion first.
+
+Dead-end entry upgraded from "no gain" to "actively harmful", with numbers
+and the certificate mechanism. No code shipped; the retraction stands as the
+price of three things at once — the manifold, the saturation geometry, and
+the termination test's meaning. With this, every engineering item measurable
+on this box is closed or shipped; the open list is the GPU run (one small
+notebook sync pending) and the convergence proof.
