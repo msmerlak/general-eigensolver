@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #35)*
+*(rewritten each tick; as of attempt #36)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 36 | **The SDC GPU run** (user ran it) | **first win over a vendor eigensolver in the whole campaign: 1.13× cupy.linalg.eig at n=512** (1.08× at 256, 0.62× at 1024). Three predictions falsified: cupy HAS `eig`; `leaf=deep` is 4.4–16.4× SLOWER not faster; and my gemm-eq column was mixed-device. `scale=none` wins 1.1–2.1× and is now default. |
 | 35 | **A standalone SDC notebook** (user request) — `sdc_gpu_colab.ipynb` | probe measures SDC's OWN operations (gemm/inverse/QR in gemm-equivalents), not the fp32:fp64 ratio. Found a 2-factorizations-per-step regression in #34's port; **first race of determinantal scaling: unscaled costs +1..+2 steps of 10-15 to save 33% per far-field step.** |
 | 34 | **Port SDC into the GPU notebook** (user request) | cells 10–11 added, validated on the NumPy path (7.9e-15..1.0e-11 across Ginibre/planted/near-sym/companion). Two forced changes: randomized range-finder for the split basis (no pivoted QR on device), and a leaf choice — host round trip vs recurse-to-2×2 — because **cuSOLVER appears to have no `geev` at all**. |
 | 33 | **The GPU run, on a T4** (user ran it) | **the all-gemm thesis FAILS here: cuSOLVER costs 15.3→6.9→5.4 gemm-equivalents, FEWER than CPU dsyevd's 8-18 and falling with n.** The ladder's premise held (fp32 eigh 3.3-3.9× cheaper) and it still lost: at n=2048 the whole fp64 solve is 5.4 gemms, so not one 5-gemm pair fits. Caveat: a crippled-fp64 die deflates every gemm-eq count. |
@@ -2519,3 +2520,74 @@ four (leaf × scaling) combinations: 7.2e-15 to 1.0e-11 against the reference's
 supersedes the cells added to the symmetric notebook in #34 — it has the
 scaling option, the SDC-specific probe, and the shared-LU discussion. The
 #34 cells are correct but older; prefer this one for SDC work.
+
+### 36. The SDC GPU run — the campaign's first win over a vendor eigensolver, and three of my predictions falsified
+
+**The win, and it is narrow and real.** Against `cupy.linalg.eig`, with
+`leaf=host, scale=none`:
+
+```
+    n   cupy.linalg.eig        SDC
+  256           86.9 ms    80.3 ms    1.08x
+  512          257.0 ms   226.5 ms    1.13x   <- win
+ 1024          790.3 ms  1271.5 ms    0.62x   <- loss
+```
+
+**This is the first time anything in this campaign has beaten a vendor
+eigensolver on any substrate.** It is size-limited, modest, and on the
+nonsymmetric side — exactly where #24 predicted the opening would be when it
+measured `dgeev` at 131–181 gemm-equivalents against `dsyevd`'s 17–25. Against
+the host round trip the margin is larger (2.02x at n=512, 1.22x at n=1024),
+but the round trip is not the right opponent where a device solver exists.
+
+**Falsified prediction 1: cuSOLVER has no `geev`.** I stated this repeatedly
+and hedged it once. **`cupy.linalg.eig` exists** on CuPy 14 and beats the host
+round trip by 1.8–2.0x at n ≥ 512. The cell tested it instead of assuming it,
+which is the only reason the race had the right baseline. The notebook's
+framing has been corrected in place.
+
+**Falsified prediction 2: no device solver would flip #25's leaf verdict.**
+The opposite, emphatically — `leaf=deep` measured **4.4x to 16.4x SLOWER** than
+`leaf=host`:
+
+```
+    n   leaf=host   leaf=deep    splits at deep
+  256      80.3 ms   1317.5 ms       133
+  512     226.5 ms   2325.7 ms       266
+ 1024    1271.5 ms   5554.3 ms       526
+```
+
+The premise was wrong twice: a device solver exists, and the bottom levels
+issue hundreds of tiny kernels (526 splits, 6156 Newton steps at n=1024).
+#25's leaf lesson does not flip on this substrate — it gets *stronger*.
+`leaf=deep` is demoted to a control in the notebook.
+
+**Confirmed prediction: unscaled Newton wins, and by more than predicted.**
+`scale=none` beats `scale=det` **2.14x/1.11x/1.26x** (leaf=host) and
+**1.25x/1.51x/1.55x** (leaf=deep), at unchanged accuracy. The flop model
+predicted 33% (2n³ against 2.67n³); the n=256 gain is 2.14x. The excess has a
+mechanism: the scaled branch reads log|det| back to the **host every Newton
+step**, so it pays a sync per iteration, and at small n that dominates the
+arithmetic. **`scale="none"` is now the default.**
+
+**A unit error of mine, worth recording.** This cell's "gemm-equivalents"
+column is **mixed-device** — the host baseline's numerator is CPU `dgeev`
+while the denominator is GPU gemm, and `leaf=host` puts a CPU solve inside
+SDC's own numerator too. The campaign's "SDC needs ~88" was measured
+CPU-over-CPU. So the cell's headline instruction ("SDC needs ~88, so this line
+decides the race") was comparing two different units, and the ms/ratio columns
+are the ones to read. Annotated in the notebook rather than silently dropped.
+
+**An open item that should not be buried.** SDC's accuracy degrades with n —
+3.8e-14 → 2.9e-13 → 3.4e-11 — against `cupy.linalg.eig`'s flat 5.2e-15 →
+9.2e-15 → 1.3e-14. Still inside the 1e-8 bar, but the trend is the wrong way
+and it is unexplained. Candidates: the oblique projector norm ‖P‖ growing with
+n (#24's mechanism), or the 1e-6 backward-error gate on the split being too
+loose to catch a marginal split. Not established; next tick.
+
+**Where this leaves the nonsymmetric side.** A real but narrow win at
+n ≤ 512, a loss by 1.6x at n=1024, and the incumbent's advantage growing with
+size — the same shape the symmetric side showed, one notch later. Whether the
+crossover moves with a fp32 sign iteration (untested, and #24 notes the ladder
+loses its Newton–Schulz half on non-symmetric input) is the obvious next
+question.
