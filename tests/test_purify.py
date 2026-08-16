@@ -133,3 +133,30 @@ def test_purify_eigh_deterministic():
     w1, V1 = purify_eigh(A)
     w2, V2 = purify_eigh(A)
     assert np.array_equal(w1, w2) and np.array_equal(V1, V2)
+
+
+def test_purify_eigh_mixed_precision():
+    """The fp32 split route: SP2 at sgemm rate, accuracy recovered by two
+    consult-A polish steps with NS re-orthonormalization between them
+    (each polish is first-order and non-orthogonal, so without the re-orth
+    the second step floors at the first's err^2 -- SSJ_LOG #19)."""
+    import numpy as np
+    from ssj import purify_eigh
+
+    r = np.random.default_rng(1)
+    M = r.standard_normal((400, 400))
+    A = (M + M.T) / np.sqrt(800)
+    w, V = purify_eigh(A, precision="mixed")
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-11
+    # documented boundary: tight clusters floor near 1e-10 on this route
+    Q, _ = np.linalg.qr(r.standard_normal((200, 200)))
+    vals = np.sort(r.standard_normal(200))
+    vals[100:105] = vals[100] + 1e-9 * np.arange(5)
+    A = (Q * vals) @ Q.T
+    A = (A + A.T) / 2
+    w, V = purify_eigh(A, precision="mixed")
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-8

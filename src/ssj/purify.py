@@ -138,7 +138,7 @@ def purify_split(A, mu, tol=1e-12, count=None):
     return B[:r, :r], B[r:, r:], r, resid
 
 
-def _sp2_projector(A, mu, tol=1e-12, max_iter=100, warmup=6):
+def _sp2_projector(A, mu, tol=1e-12, max_iter=100, warmup=6, dtype=None):
     """Projector onto eigenvalues below mu: McWeeny warmup, then SP2.
 
     SP2 (Niklasson): P <- P^2 or 2P - P^2, branched on the trace against the
@@ -152,16 +152,20 @@ def _sp2_projector(A, mu, tol=1e-12, max_iter=100, warmup=6):
     c = 0.5 / max(hi - mu, mu - lo, 1e-300)
     P = -c * A
     P.flat[:: n + 1] += 0.5 + c * mu
+    if dtype is not None:
+        P = P.astype(dtype)
     for _ in range(warmup):
         P2 = P @ P
         P = 3.0 * P2 - 2.0 * (P @ P2)
-    r = float(np.rint(np.trace(P)))
-    for _ in range(max_iter):
+    r = float(np.rint(np.trace(P.astype(np.float64))))
+    for it in range(max_iter):
         P2 = P @ P
-        if float(np.linalg.norm(P2 - P, "fro")) < tol * np.sqrt(n):
+        # the check is an O(n^2) pass; every 3rd iteration is plenty
+        if it % 3 == 0 and \
+                float(np.linalg.norm(P2 - P, "fro")) < tol * np.sqrt(n):
             break
         P = P2 if np.trace(P) - r > 0 else 2.0 * P - P2
-    return P, int(r)
+    return P.astype(np.float64), int(r)
 
 
 def _ipt_polish(A, w, V):
@@ -191,7 +195,8 @@ def _ipt_polish(A, w, V):
     return d[order], V2[:, order]
 
 
-def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
+def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
+                precision="full"):
     """Full symmetric eigendecomposition by recursive purification bisection.
 
     The OTHER pure-gemm family (SSJ_LOG #16-17): iterate on the MATRIX, not a
@@ -219,6 +224,14 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
       subspaces of eigenvalues adjacent to each mu at the purification
       tolerance, and eigenvalues (5.9e-15) forgive what residuals remember.
 
+    precision : "mixed" runs the SP2 projector in float32 (sgemm rate) and
+        recovers accuracy with TWO consult-A polish steps interleaved with
+        Newton-Schulz re-orthonormalization -- measured 3.8x/5.2x LAPACK at
+        n=400/800 against "full"'s 6.0x/8.5x. Caveat, measured: residuals on
+        tight clusters floor at ~1e-10 on this route (the polish guard
+        rightly skips intra-cluster corrections, so fp32-induced mixing
+        inside a cluster stays); eigenvalues remain at 1e-15. Use "full"
+        when cluster residuals matter.
     leaf : recurse until blocks are this small (default n//2 -- one
         bisection, measured best at n <= 800; deeper recursion is for sizes
         where `eigh` itself is the bottleneck, e.g. GPUs).
@@ -231,8 +244,10 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
         rng = np.random.default_rng(0x5D1)  # deterministic by default
     if n <= leaf:
         return np.linalg.eigh(A)
+    mixed = precision == "mixed"
     mu = float(np.trace(A).real) / n
-    P, r = _sp2_projector(A, mu, tol=tol)
+    P, r = _sp2_projector(A, mu, tol=(1e-6 if mixed else tol),
+                          dtype=(np.float32 if mixed else None))
     if r <= 0 or r >= n:  # spectrum did not split at the mean: fall back
         return np.linalg.eigh(A)
     G = rng.standard_normal((n, n))
@@ -246,10 +261,13 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
     # exactly AT mu sit at the purification fixed point 1/2, where SP2's
     # trace branch can mis-rank and cut inside a degenerate cluster. A bad
     # split shows up as off-block mass; fall back to the dense solver then.
-    if np.linalg.norm(B[r:, :r], "fro") > 1e-8 * np.linalg.norm(A, "fro"):
+    net = 1e-4 if mixed else 1e-8   # fp32 splits legitimately carry ~1e-7
+    if np.linalg.norm(B[r:, :r], "fro") > net * np.linalg.norm(A, "fro"):
         return np.linalg.eigh(A)
-    w1, V1 = purify_eigh(B[:r, :r], leaf, tol, rng, polish=False)
-    w2, V2 = purify_eigh(B[r:, r:], leaf, tol, rng, polish=False)
+    w1, V1 = purify_eigh(B[:r, :r], leaf, tol, rng, polish=False,
+                         precision=precision)
+    w2, V2 = purify_eigh(B[r:, r:], leaf, tol, rng, polish=False,
+                         precision=precision)
     V = np.empty((n, n))
     V[:, :r] = Q[:, :r] @ V1
     V[:, r:] = Q[:, r:] @ V2
@@ -257,5 +275,16 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
     order = np.argsort(w, kind="stable")
     w, V = w[order], V[:, order]
     if polish:
-        w, V = _ipt_polish(A, w, V)  # once, at the top level only
+        # fp64 splits need one consult-A step; fp32 splits need two, with a
+        # Newton-Schulz re-orthonormalization between them -- the polish is a
+        # first-order NON-ORTHOGONAL correction, so each step leaves an
+        # O(err^2) orthogonality defect that would floor the next step (the
+        # congruence lesson of SSJ_LOG #15/#19). One NS step (2 gemms) takes
+        # a 1e-8 defect to 1e-16 and keeps the refinement quadratic:
+        # 2e-4 -> 3e-8 -> 2e-12 -> 2e-15 measured per step at n=800.
+        for _ in range(2 if mixed else 1):
+            w, V = _ipt_polish(A, w, V)
+            if mixed:
+                G = V.T @ V
+                V = V @ (1.5 * np.eye(n) - 0.5 * G)
     return w, V

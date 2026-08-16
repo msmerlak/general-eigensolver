@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #18)*
+*(rewritten each tick; as of attempt #19)*
 
 **The campaign's arc closed a loop.** Sixteen attempts of understanding-driven
 work on SSJ — divide-by-gap mechanics, the two-phase anatomy, the basin
@@ -47,10 +47,22 @@ on every spectrum. SP2's trace-branched squaring then cuts the split's
 substrate cost (one gemm + a trace per iteration, 1.3–1.4× on wall at equal
 gemm counts), with a free split-verification fallback covering its one
 fragility (ties exactly at μ sit at the purification fixed point ½).
-**Champion: 6.0–9.3× LAPACK at full accuracy (resid 3e-15).**
+**Champion: `precision="mixed"` at 4.9–6.7× LAPACK (GOE resid ≤6e-14; tight-cluster residuals floor at ~1e-10, documented); `"full"` at 6.0–8.5× with resid 3e-15 everywhere.**
+
+**Precision refinement is a ladder, and every rung is a measured mechanism
+(#19).** fp32 purification alone freezes subspace error (#17). Adding a
+consult-A polish unfreezes it — but stalls at err² ≈ 1e-8, because the
+polish is a first-order NON-orthogonal correction whose rotation leaves an
+O(err²) orthogonality defect, and the next step inherits it as congruence
+error (#15's lesson resurfacing at a smaller scale). One Newton–Schulz step
+between polishes (2 gemms; 1e-8 defect → 1e-16) restores exact
+error-squaring: 2e-4 → 3e-8 → 2e-12 → 2e-15 measured per step. The general
+principle: **iterative refinement for the eigenproblem = consult-A step +
+re-orthonormalization, alternating; skip either and you floor.**
 
 **Open:** (1) the GPU run — sync the notebook (warm fixes #14 + a
-`purify_eigh` cell); (2) the convergence proof for SSJ, still unclaimed.
+`purify_eigh` cell; on tensor cores the fp32-split route is the natural
+headliner); (2) the convergence proof for SSJ, still unclaimed.
 
 ## What SSJ is, and where the cost sits
 
@@ -220,6 +232,7 @@ the tail-exclusion path fires.
 | 16 | **Is IPT the only pure-gemm endgame?** (user steer) — map the families; prove ρ(p(B)) invariance; measure the purification recursion end to end | **basin invariance proven + verified; purification loses 1.3× on CPU at full accuracy — the strong second family, GPU-shaped.** |
 | 17 | **Close purification's gap**: randomized extraction, leaf tuning, mixed purify | **NEW CPU CHAMPION — 8.3×/9.9× LAPACK** (vs composed SSJ 12×/16×), shipped as `purify_eigh` + tests. Mixed purify refuted with mechanism: the map freezes subspace error. |
 | 18 | **Compose the families**: one IPT step polishes the purified basis; SP2 replaces McWeeny; split-verification fallback | **champion at full accuracy: 6.0–9.3× LAPACK, resid 3e-15.** Suite caught SP2×degeneracy; safety net free on the happy path. |
+| 19 | **fp32 splits + the refinement ladder** (consult-A polish ⟂ NS re-orth, alternating) | **champion again: 4.9×/6.7× LAPACK shipped as `precision="mixed"`.** The polish alone floors at err² — the interleaved NS step restores quadratic refinement. |
 
 ### 1. SSJ-BC — verified
 
@@ -1256,3 +1269,49 @@ Eigenvalues 4.5–5.9e-15, residuals 2.4–3.1e-15. 165 tests pass. The
 campaign's CPU standing has moved 28–42× → 16–18× (SSJ line, attempts 1–15)
 → **6–9× at full accuracy** (purification line, attempts 16–18, from one
 steered question). The notebook sync is the last engineering item.
+
+### 19. fp32 splits, and the refinement ladder that makes them exact
+
+The champion's dominant cost is the full-size SP2 projector (~55 gemms, half
+the wall). #17 proved mixed purification freezes fp32 subspace error — but
+that proof is about the purification loop *in isolation*, and the solver now
+ends with an IPT polish that consults A. This tick tested the refutation's
+own escape clause.
+
+**First attempt: fp32 SP2 + k polish steps.** The ladder stalled at ~1e-8,
+*non-monotonically* (k=1: 3e-9, k=2: 1e-7). Mechanism: the polish's
+correction C ≈ antisymmetric is a first-order rotation applied WITHOUT
+re-orthonormalization, so V's orthogonality defect lands at O(err²) ≈ 1e-8 —
+and the next polish step works in a frame carrying exactly that congruence
+error. #15's certificate lesson, resurfacing at a smaller scale: a
+non-orthonormal frame poisons the next iteration at its defect².
+
+**The fix follows from the mechanism: alternate.** One Newton–Schulz step
+(2 gemms) between polishes takes a 1e-8 defect to 1e-16, restoring exact
+error-squaring — measured per step at n=800: **2e-4 → 3e-8 → 2e-12 → 2e-15.**
+The general shape is worth stating: *iterative refinement for the
+eigenproblem is a consult-A step and a re-orthonormalization, alternating;
+skip either and you floor.* (IPT alone escapes this only because its v_jj=1
+normalization plays the role of the second step within its basin.)
+
+**Shipped as `purify_eigh(precision="mixed")`** — fp32 SP2 (sgemm rate,
+convergence checked every 3rd iteration; the O(n²) check was ~50 needless
+passes), loosened split net (fp32 splits legitimately carry ~1e-7), two
+polish steps with the NS interleave. Verified post-ship, clean runs
+(5.9% / 0.4%):
+
+| | n=400 | n=800 |
+|---|---|---|
+| `mixed` (new champion) | **84.4 ms = 4.9×** | **461.1 ms = 6.7×** |
+| `full` (#18) | 105.2 ms = 6.1× | 591.7 ms = 8.5× |
+
+GOE accuracy 3.7e-15 / 5.7e-14. **The documented boundary:** tight-cluster
+residuals floor at ~1e-10 on the mixed route — the polish guard rightly
+skips intra-cluster corrections, so fp32-induced mixing inside a cluster
+stays. Eigenvalues remain 1e-15 there. `precision="full"` is the default and
+keeps 3e-15 residuals everywhere; the test suite pins both routes and the
+boundary. 166 tests pass.
+
+Campaign standing on the cold CPU solve: 28–42× (start) → 16–18× (SSJ line)
+→ 6–9× (#17–18) → **4.9–6.7×** — inside 5× of LAPACK at n=400, from a
+pure-gemm method with a global basin.
