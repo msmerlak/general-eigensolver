@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #30)*
+*(rewritten each tick; as of attempt #31)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 31 | **Work on SDC** (user) — shift probe, which found a catastrophe instead | **#29's `ns_switch=0.9`, swept on Ginibre alone, made SYMMETRIC input 54× slower than dgeev** (665 iters, 12 failed shifts, fallback). NS's region is in the operator norm; dev is Frobenius/√n. Correct test is ‖I−X²‖_F < 1 = a 1/√n scaling law. **symmetric n=800: 13448 → 422 ms.** |
 | 30 | **Work on SDC** (user) — scaling sweep, then the far-field convergence test | **scaling refuted too (unscaled ≈ determinantal; pre-scale worth 0 iterations), but half a far-field step was a gemm that only tested convergence.** Gate on the Newton update norm: **0.67×/0.73×/0.73× dgeev**, identical iteration counts; Python 207→124 / 748→587 ms. Surfaced a pre-existing silent non-convergence. |
 | 29 | **Cheapen the sign iteration** via the Newton→Newton-Schulz threshold (#28's named target) | **refuted, with the trajectory.** Quadratic convergence crosses the whole disputed band in 1–2 of 16 steps, so there is nothing to reassign; past 1.0 it degrades. 0.9 shipped at noise level (3–5%). Real cost is the 8–11 far-field steps. |
 | 28 | **Improve the C SDC** — instrument the shift guards, then the leaf | **the #27 diagnosis was a guess and was wrong: ZERO shifts are ever rejected.** The second sign call is a second split, caused by leaf = n/2 landing just under r = trace(P). Leaf 3n/5: **0.60×/0.67×/0.65× dgeev** (C), 412→207 / 1315→748 ms (Python). |
@@ -2128,3 +2129,87 @@ the sign iteration's cost and, past a point, its convergence. Ginibre is the
 easy case. Both are now pinned by tests.
 
 183 tests pass.
+
+### 31. The handoff threshold was tested in the wrong norm — and #29 was tuned on one spectrum
+
+**Chasing the shift led somewhere else.** #30 named the near-symmetric case as
+SDC's weak point, so this tick set out to choose the split shift by measuring
+it: `sigma_min(A - sigma I)` is the distance from sigma to the spectrum, one
+LU plus a few inverse-power steps returns it for ~1/3 of a gemm, and a wasted
+sign call costs ~32. The probe works exactly as intended on real spectra —
+`sigmin est` matched the true `min |Re(lambda) - sigma|` to 3–4 digits at
+every candidate. It was never needed.
+
+**Because the shipped solver turned out to be catastrophically broken on
+symmetric input, at every shift.** Running the public entry point rather than
+a reimplementation:
+
+```
+  case          n     sdc ms   dgeev ms   ratio   N+NS  calls  fallback
+  symmetric   400     2712.7       48.5   0.02x    665     12         1
+  symmetric   800    13447.6      239.1   0.02x    665     12         1
+```
+
+**665 sign iterations across 12 shift retries, all failing, then a fallback**
+— 54x slower than dgeev, saved from being *wrong* only by the fallback. 665/12
+≈ 55 ≈ max_iter, so the iteration was not converging. Yet pure Newton converges
+on the same matrix in 12 steps. That isolated it to the Newton–Schulz handoff.
+
+**The cause, and it was written in the code's own comment.** NS converges only
+inside ‖I − X²‖₂ < 1. The loop's progress measure is
+dev = ‖I − X²‖_F/√n — an RMS quantity that can sit far BELOW the operator
+norm. A fixed threshold on dev therefore tests the wrong norm, and how wrong
+depends on the spectrum. #29's comment said exactly this ("this measure is
+normalized by sqrt(n) and is therefore not that norm, which is exactly why the
+useful value is measured rather than derived") — and then #29 measured it on
+**Ginibre alone** and shipped 0.9 as "never worse than 0.6 anywhere".
+
+```
+  symmetric n=400   ns 0.90 -> 2712 ms, 665 iters, 12 calls, fallback
+                    ns 0.60 ->  105 ms,  20 iters,  1 call
+                    ns 0.10 ->   82 ms,  13 iters,  1 call
+                    ns 0.05 ->   81 ms,  12 iters,  1 call
+```
+
+**The fix is a scaling law, not a constant.** Since ‖M‖₂ ≤ ‖M‖_F always,
+requiring **‖I − X²‖_F < 1** *guarantees* NS converges. In the loop's
+normalized units that is dev < 1/√n — and the empirically best fixed value,
+0.05 at n=400, is exactly 1/√400. The magic constant was a scaling law wearing
+a disguise, which is why every attempt to tune it on one size and one spectrum
+produced a number that did not travel.
+
+**Measured after the fix** (`ns_frob = 1.0`, guaranteed-safe, both languages):
+
+```
+  case             n    before      after      calls  fallback
+  symmetric      400   2712 ms      76.0 ms      1        0
+  symmetric      800  13448 ms     421.9 ms      1        0
+  near-sym 1e-2  800        —      426.6 ms      1        0
+  Ginibre    200/400/800   0.67/0.73/0.73x   0.60/0.69/0.72x
+```
+
+**32–36× on the broken cases, for 2–5% on Ginibre** — the price of testing a
+bound instead of a tuned threshold, and obviously worth paying. Accuracy
+2.1e-14 to 6.0e-13 throughout. `matrix_sign`'s parameter is now `ns_frob`, a
+bound on the un-normalized Frobenius norm, defaulting to the safe value and
+exposed for sweeping rather than tuning.
+
+**Fourteenth measurement lesson, and it indicts a process, not a number.**
+#29's sweep was competent: eight thresholds, three sizes, accuracy asserted,
+contamination checked, and an honest "this is noise-level" label. It was still
+wrong, because every row came from **one matrix class**. A parameter swept on
+a single spectrum is not measured, it is fitted — and this one was fitted to
+the *easy* case, which #30 had already shown Ginibre to be. The tell was
+available in advance: the code comment named the norm mismatch as the reason
+the value had to be empirical, which is precisely the reason it could not be
+empirical from one distribution. **When you know a parameter's correct value
+depends on a property of the input, sweeping over inputs that share that
+property measures nothing.**
+
+A regression test now pins both directions: the default converges on a
+symmetric n=400 in under 25 iterations, and the old dev < 0.9 rule
+(`ns_frob = 0.9·√n`) must raise. The unconverged-S test no longer leans on a
+hard matrix — it starves `max_iter` instead, since a regression test that
+depends on something staying broken rots the moment it is fixed.
+
+184 tests pass.

@@ -44,12 +44,16 @@ void lapack_eig_c(const double *A, int64_t n, double *wr, double *wi);
 /* One isolated sign evaluation, for attribution. Returns iterations, or -1. */
 int matrix_sign_bench(const double *A, int64_t n, double shift, sdc_stats *st);
 
-/* Threshold on ||X^2 - I||_F/sqrt(n) below which the sign iteration hands off
- * from scaled Newton to Newton-Schulz. Exposed so it can be swept rather than
- * asserted. Default 0.9, and NOT a lever: the iteration converges
- * quadratically and crosses the whole disputed band in 1-2 of 16 steps, so
- * there is nothing to reassign wherever it sits (SSJ_LOG #29). The 0.6 -> 0.9
- * move is worth 3-5%, inside this box's contamination band. */
+/* Bound on ||I - X^2||_F below which the sign iteration hands off from scaled
+ * Newton to Newton-Schulz. Default 1.0, which is the GUARANTEED-safe value:
+ * ||M||_2 <= ||M||_F always, and NS converges inside ||I - X^2||_2 < 1.
+ *
+ * This is a bound on the un-normalized Frobenius norm, i.e. dev < 1/sqrt(n)
+ * in the loop's normalized units -- a scaling law, not a constant. A fixed
+ * threshold on dev tests the wrong norm: at dev < 0.9 (SSJ_LOG #29, swept on
+ * Ginibre alone) a symmetric matrix enters NS outside its convergence region
+ * and never converges, costing 2712 ms against dgeev's 48 ms at n=400 and
+ * 13448 ms at n=800 (SSJ_LOG #31). Exposed for sweeping, not for tuning. */
 void sdc_set_ns_switch(double v);
 double sdc_get_ns_switch(void);
 

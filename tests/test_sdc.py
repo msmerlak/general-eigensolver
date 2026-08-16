@@ -143,15 +143,39 @@ def _near_symmetric(n, seed=11):
 def test_matrix_sign_raises_rather_than_returning_an_unconverged_S():
     """Running out of iterations must be an error, not a return value.
 
-    It previously returned (X, max_iter), which is indistinguishable from
-    converging on the last allowed iteration, so a non-converged S -- here
-    ||S^2 - I||/sqrt(n) = 3.4e-01, with a spectral count wrong by three --
-    propagated silently to the caller.
+    It previously returned (X, max_iter), indistinguishable from converging on
+    the last allowed iteration, so a non-converged S propagated silently. The
+    budget is starved deliberately here rather than leaning on a hard matrix:
+    the hard cases are the ones we keep fixing, and a regression test that
+    depends on something staying broken rots the moment it is repaired.
     """
-    A = _near_symmetric(800)
+    A = _near_symmetric(200)
     mu = float(np.trace(A)) / A.shape[0]
     with pytest.raises(np.linalg.LinAlgError):
-        matrix_sign(A - mu * np.eye(A.shape[0]))
+        matrix_sign(A - mu * np.eye(A.shape[0]), max_iter=2)
+
+
+def test_ns_handoff_uses_the_frobenius_bound_not_a_fixed_dev_threshold():
+    """NS converges only inside ||I - X^2||_2 < 1, and ||M||_2 <= ||M||_F, so
+    gating on ||I - X^2||_F < 1 is guaranteed safe. Gating on a FIXED value of
+    dev = ||.||_F/sqrt(n) is not: it tests the wrong norm, and on a symmetric
+    matrix -- whose RMS deviation sits far below the operator norm -- the old
+    dev < 0.9 rule entered NS outside its region and never converged.
+
+    ns_frob = 1.0 (the default) must converge; a deliberately unsafe bound
+    scaled up by sqrt(n) reproduces the old broken rule and must not.
+    """
+    n = 400
+    A = _near_symmetric(n)
+    mu = float(np.trace(A)) / n
+    M = A - mu * np.eye(n)
+
+    S, iters = matrix_sign(M)                       # default ns_frob = 1.0
+    assert np.linalg.norm(S @ S - np.eye(n)) / np.sqrt(n) < 1e-10
+    assert iters < 25
+
+    with pytest.raises(np.linalg.LinAlgError):      # the old dev < 0.9 rule
+        matrix_sign(M, ns_frob=0.9 * np.sqrt(n))
 
 
 def test_sdc_survives_the_near_symmetric_case_it_cannot_split_at_the_centroid():

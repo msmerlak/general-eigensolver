@@ -48,7 +48,7 @@ import numpy as np
 __all__ = ["sdc_eigvals", "matrix_sign"]
 
 
-def matrix_sign(A, tol=1e-12, max_iter=60, ns_switch=0.6, count=None):
+def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, count=None):
     """Matrix sign function by scaled Newton with a Newton-Schulz endgame.
 
     Returns (S, iters). `count` optionally accumulates a cost model in
@@ -60,6 +60,16 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_switch=0.6, count=None):
     one sits close enough that the iteration cannot converge within max_iter,
     this raises LinAlgError rather than returning an unconverged S -- see the
     note at the end of the loop.
+
+    ns_frob : bound on ||I - X^2||_F for handing off to Newton-Schulz. 1.0 is
+        GUARANTEED safe (||M||_2 <= ||M||_F, and NS converges inside
+        ||I - X^2||_2 < 1) and is the default. Note this is a bound on the
+        UN-normalized Frobenius norm, so in the loop's dev = ||.||_F/sqrt(n)
+        units the threshold is 1/sqrt(n) -- a scaling law, not a constant.
+        A fixed threshold on dev tests the wrong norm and breaks on spectra
+        whose RMS deviation sits far below the operator norm: at dev < 0.9 a
+        symmetric n=400 matrix enters NS outside its convergence region and
+        never converges (SSJ_LOG #31).
     """
     n = A.shape[0]
     eye = np.eye(n)
@@ -97,6 +107,8 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_switch=0.6, count=None):
     # without ever looking. (SSJ_LOG #30.)
     delta_prev = np.inf
     since_check = 0
+    # ns_frob bounds ||I - X^2||_F; the loop carries dev = ||.||_F/sqrt(n).
+    ns_switch = ns_frob / np.sqrt(n)
 
     for it in range(1, max_iter + 1):
         if delta_prev < ns_switch or since_check >= 8:

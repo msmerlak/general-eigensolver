@@ -15,7 +15,8 @@
  *      (O(n^2) and tight; the cheap sqrt(||.||_1 ||.||_inf) bound over-scales
  *      a random matrix badly and ADDS Newton steps)
  *   2. sign iteration: scaled Newton X <- (mu X + mu^-1 X^-1)/2 while far,
- *      Newton-Schulz X <- X(3I - X^2)/2 once ||X^2 - I||/sqrt(n) < 0.6
+ *      Newton-Schulz X <- X(3I - X^2)/2 once ||I - X^2||_F < 1, which is
+ *      the bound that GUARANTEES NS converges (see g_ns_frob)
  *   3. P = (I + S)/2, r = round(trace P); pivoted QR of P gives an orthonormal
  *      basis whose first r columns span the invariant subspace
  *   4. B = Q^T A Q is block upper triangular; recurse, leaves to dgeev
@@ -86,29 +87,33 @@ static double *xmalloc_d(size_t k) {
     return p;
 }
 
-/* Handoff threshold from scaled Newton to Newton-Schulz, on
- * ||X^2 - I||_F/sqrt(n). Newton-Schulz for the sign function converges only
- * inside ||I - X^2|| < 1, so 1.0 is a hard ceiling in the operator norm; this
- * measure is normalized by sqrt(n) and is therefore not that norm, which is
- * exactly why the useful value is measured rather than derived.
+/* Newton -> Newton-Schulz handoff, as a bound on ||I - X^2||_F.
  *
- * 0.9 measured best at n=200 and n=400 and within noise of best at n=800,
- * and is never worse than the previous 0.6 anywhere in a sweep over
- * {0.6, 0.8, 0.9, 0.95, 1.0, 1.1, 1.3, 1.6}. But the honest size of the win
- * is 3-5%, which overlaps this box's contamination band -- record it as
- * noise-level, not as a result.
+ * NS for the sign function converges only inside ||I - X^2||_2 < 1. The
+ * iteration's natural progress measure here is dev = ||I - X^2||_F/sqrt(n),
+ * an RMS quantity that can sit FAR BELOW the operator norm -- so a fixed
+ * threshold on dev is testing the wrong norm, and how wrong depends on the
+ * spectrum.
  *
- * THIS PARAMETER IS NOT A LEVER, and that is the real finding (SSJ_LOG #29).
- * The iteration converges quadratically, so dev crosses the entire disputed
- * band in one or two steps: of 16 steps at n=800, exactly 2 land in
- * [0.6, 1.6]. There is almost nothing there to reassign no matter where the
- * threshold sits. Past 1.0 it gets monotonically WORSE (0.66x -> 0.60x at
- * n=800) because NS entered outside its region converges slowly and the step
- * count grows 6 -> 12. The sign iteration's cost is set by the 8-11 steps
- * spent FAR from convergence, where only Newton works. */
-static double g_ns_switch = 0.9;
-void sdc_set_ns_switch(double v) { g_ns_switch = v; }
-double sdc_get_ns_switch(void) { return g_ns_switch; }
+ * That is not hypothetical: at dev < 0.9 (SSJ_LOG #29, measured on Ginibre
+ * alone) a SYMMETRIC matrix enters NS outside its convergence region, never
+ * converges, and burns all twelve shift retries before falling back --
+ * 2712 ms against dgeev's 48 ms at n=400, and 13448 ms at n=800. Ginibre
+ * never exposed it because its spectrum fills a disk; a dense real spectrum
+ * does. #29's sweep was right about Ginibre and wrong about everything else.
+ *
+ * The fix is to test the norm that governs convergence. Since
+ * ||M||_2 <= ||M||_F always, requiring ||I - X^2||_F < 1 GUARANTEES NS
+ * converges. In the normalized units the loop already carries, that is
+ * dev < 1/sqrt(n) -- so the threshold is a scaling law, not a constant, and
+ * the empirically best fixed value (0.05 at n=400) is just 1/sqrt(400).
+ *
+ * g_ns_frob is the bound on the un-normalized Frobenius norm. 1.0 is the
+ * guaranteed-safe value and the default; it is exposed only so the bound can
+ * be swept, not because it should be tuned. */
+static double g_ns_frob = 1.0;
+void sdc_set_ns_switch(double v) { g_ns_frob = v; }
+double sdc_get_ns_switch(void) { return g_ns_frob; }
 
 /* Deterministic xorshift, so shift retries are reproducible run to run. */
 static uint64_t g_rs = 0x5D1ULL;
@@ -233,6 +238,10 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     /* Ping-pong so the Newton-Schulz gemm never aliases its own input. */
     double *cur = X, *alt = ws->alt, *x2 = ws->x2;
 
+    /* ns_switch arrives as a bound on ||I - X^2||_F; the loop works in
+     * dev = ||I - X^2||_F/sqrt(n), so convert once here. */
+    const double ns_thresh = ns_switch / sqn;
+
     /* THE FAR-FIELD GEMM IS OPTIONAL, and skipping it is the whole point here
      * (SSJ_LOG #30). A far-field Newton step costs X^2 (2n^3) + dgetrf
      * (2n^3/3) + dgetri (4n^3/3) = 4n^3, and HALF of that is a gemm whose only
@@ -259,7 +268,7 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     int it = 0;
     int converged = 0;
     for (it = 1; it <= max_iter; it++) {
-        int check = (delta_prev < ns_switch) || (since_check >= 8);
+        int check = (delta_prev < ns_thresh) || (since_check >= 8);
         if (!check) {                      /* far field: skip the 2n^3 gemm */
             since_check++;
             goto newton_step;
@@ -271,7 +280,7 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
         if (st) st->last_dev = dev;
         if (dev < tol) { converged = 1; break; }
 
-        if (dev < ns_switch) {
+        if (dev < ns_thresh) {
             /* Newton-Schulz: 2 gemms, no factorization, quadratic.
              * Build 1.5I - 0.5 X^2 in place over X2, then one gemm. */
             for (size_t k = 0; k < nn; k++) x2[k] *= -0.5;
@@ -335,7 +344,7 @@ static bi split_once(const double *A, bi n, double shift, double tol,
     for (bi i = 0; i < n; i++) ws->cur[IDX(i, i, n)] -= shift;
 
     double t0 = now_s();
-    int its = matrix_sign_c(ws->cur, n, tol, g_ns_switch, 60, ws, st);
+    int its = matrix_sign_c(ws->cur, n, tol, g_ns_frob, 60, ws, st);
     if (st) { st->t_sign += now_s() - t0; st->n_sign_calls++; }
     if (its == -1) { if (st) { st->n_fail_singular++; } return -2; }
     if (its < 0) {                       /* ran out of iterations */
@@ -539,7 +548,7 @@ int matrix_sign_bench(const double *A, bi n, double shift, sdc_stats *st) {
     size_t nn = (size_t)n * (size_t)n;
     memcpy(ws.cur, A, nn * sizeof(double));
     for (bi i = 0; i < n; i++) ws.cur[IDX(i, i, n)] -= shift;
-    int its = matrix_sign_c(ws.cur, n, 1e-12, g_ns_switch, 60, &ws, st);
+    int its = matrix_sign_c(ws.cur, n, 1e-12, g_ns_frob, 60, &ws, st);
     ws_free(&ws);
     return its;
 }
