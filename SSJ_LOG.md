@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #29)*
+*(rewritten each tick; as of attempt #30)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 30 | **Work on SDC** (user) — scaling sweep, then the far-field convergence test | **scaling refuted too (unscaled ≈ determinantal; pre-scale worth 0 iterations), but half a far-field step was a gemm that only tested convergence.** Gate on the Newton update norm: **0.67×/0.73×/0.73× dgeev**, identical iteration counts; Python 207→124 / 748→587 ms. Surfaced a pre-existing silent non-convergence. |
 | 29 | **Cheapen the sign iteration** via the Newton→Newton-Schulz threshold (#28's named target) | **refuted, with the trajectory.** Quadratic convergence crosses the whole disputed band in 1–2 of 16 steps, so there is nothing to reassign; past 1.0 it degrades. 0.9 shipped at noise level (3–5%). Real cost is the 8–11 far-field steps. |
 | 28 | **Improve the C SDC** — instrument the shift guards, then the leaf | **the #27 diagnosis was a guess and was wrong: ZERO shifts are ever rejected.** The second sign call is a second split, caused by leaf = n/2 landing just under r = trace(P). Leaf 3n/5: **0.60×/0.67×/0.65× dgeev** (C), 412→207 / 1315→748 ms (Python). |
 | 27 | **SDC in a compiled language** (user request) — `csrc/sdc_eig.c`, same OpenBLAS | **0.56×/0.61×/0.61× dgeev at n=200/400/800, from Python's 0.07×/0.13× — a 5–8× implementation gain.** #25's ledger was right; NumPy was the whole gap. Sign is 66–71%, and one wasted shift retry is ~1/3 of the run. |
@@ -2040,3 +2041,90 @@ trajectory, not of the step cost. **A cost model over step types predicts
 nothing until it is weighted by the step DISTRIBUTION**, and the distribution
 here is set by quadratic convergence, which concentrates the iterations
 exactly where the choice does not exist.
+
+### 30. The far-field convergence test was half the far-field step
+
+**Where #29 left it.** Sign is ~60% of the run; its cost is the 8–11 steps
+spent far from convergence; and neither the Newton/NS threshold (#29) nor the
+scaling is a lever. The scaling arm was closed first, this tick:
+
+```
+iterations to ||X^2-I||_F/sqrt(n) < 1e-12      det   fro  1-inf  none
+  Ginibre  n=200/400/800                    16/14/17  17/16/18  21/19/FAIL  17/14/17
+  near-sym n=200/400/800                    23/22/25  identical across all four
+```
+
+Determinantal scaling is already the best of Byers' options; 1-inf is worse
+and fails outright at n=800; and **unscaled Newton matches determinantal
+almost exactly**, so the scaling is not doing the work anyone assumes. The
+pre-scale by ‖X‖₂ — 20 power iterations — changes the count by **zero** at
+every size. Two more arms closed.
+
+**But the sweep made the real target visible, and it was in the loop the whole
+time.** A far-field Newton step costs
+
+```
+    X^2 via dgemm     2n^3      <-- ONLY to evaluate ||X^2 - I||
+    dgetrf            2n^3/3
+    dgetri            4n^3/3
+                      -----
+                      4n^3
+```
+
+**Half of a far-field step is a gemm that computes nothing the algorithm
+uses** — it exists solely to test convergence. And Newton already builds the
+entire update, whose norm is the same signal for O(n²):
+
+    Delta = (X⁻¹ − X)/2 = X⁻¹(I − X²)/2.
+
+**Calibrated before implementing.** Printing dev and Delta side by side on
+Ginibre and near-symmetric at n=400 and 800: Delta tracks **dev/2 to two
+digits** through the whole endgame (ratio 0.50, 0.50, 0.50, …), and Delta is
+never small while dev is large. So gating on `delta_prev < ns_switch`
+reproduces the *identical* Newton–Schulz entry point while forming X² once or
+twice instead of 8–11 times. X² is still built whenever the gate opens, since
+the NS step consumes it and the handoff deserves the exact value, not a proxy;
+a forced check every 8 iterations stops a pathological Delta sequence riding
+to max_iter unexamined.
+
+**Measured — iteration counts identical, wall down:**
+
+```
+   n   before   after    sign phase        dlam
+ 200   0.58x    0.67x    —                 4.3e-14
+ 400   0.70x    0.73x    49.3 -> 44.0 ms   3.9e-14
+ 800   0.66x    0.73x   316.5 -> 265.9 ms  6.1e-13
+```
+
+10 Newton + 6 NS at n=800 before and after, so the gate is exactly
+behaviour-preserving. Python gains more, being the more allocation-bound of
+the two: **207 → 124 ms at n=200 and 748 → 587 ms at n=400.**
+
+**The flop model over-predicted, and the reason is the campaign's usual law
+running backwards.** Removing 10 gemms of 2n³ from a 64n³ sign phase should
+be ~31%; measured 16% at n=800. The operation removed was the *fastest* one —
+a gemm at peak rate — while what remains, `dgetrf` + `dgetri`, runs below
+peak. **Deleting gemms from a factorization-bound kernel pays less than the
+flop count says**, which is the exact mirror of #13/#23's "the arithmetic is
+gemms, so it is cheap". Same law, opposite sign, and it caught me predicting
+twice the delivered gain.
+
+**A pre-existing bug, surfaced by the verification rather than the change.**
+Checking the gate against the old code on a near-symmetric matrix showed both
+producing bit-identical output — and both **wrong**: at n=800 `matrix_sign`
+runs to max_iter with ‖S²−I‖/√n = **3.4e-01** and a spectral count wrong by
+three. It then returned `(X, max_iter)`, which is indistinguishable from
+succeeding on the last allowed iteration, so an unconverged S propagated
+silently. Now raises `LinAlgError`, which `sdc_eigvals`'s shift-retry loop
+already catches — the recovery path existed, nothing was routing into it.
+
+**And it corrects which case is hard.** The whole non-symmetric campaign has
+benchmarked Ginibre, whose spectrum fills a *disk*, so a vertical split at the
+centroid cuts a two-dimensional cloud and few eigenvalues land near the line.
+A **near-symmetric** matrix has a real spectrum dense *on* a line, so a
+centred split ALWAYS has eigenvalues arbitrarily close to it — here 3.8e-04
+relative to ‖A‖ — and proximity to the splitting line is precisely what sets
+the sign iteration's cost and, past a point, its convergence. Ginibre is the
+easy case. Both are now pinned by tests.
+
+183 tests pass.

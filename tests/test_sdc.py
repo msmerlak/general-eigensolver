@@ -8,6 +8,7 @@ import os
 import sys
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 from ssj.sdc import matrix_sign, sdc_eigvals  # noqa: E402
@@ -122,3 +123,56 @@ def test_sdc_leaf_default_is_one_split():
     # the default must equal the explicit one-split configuration
     w2 = np.sort_complex(sdc_eigvals(A, min_block=100))
     assert np.max(np.abs(w - w2)) / nrm < 1e-12
+
+
+def _near_symmetric(n, seed=11):
+    """(G + G^T)/2 for a Ginibre G: a REAL, dense spectrum on a line.
+
+    This is SDC's genuinely hard case, and it is the opposite of the
+    intuition the Ginibre benchmark builds. A Ginibre spectrum fills a disk,
+    so a vertical split at the centroid cuts a two-dimensional cloud and few
+    eigenvalues land near the line. A symmetric matrix's spectrum is real and
+    dense ON a line, so a split at the centroid ALWAYS has eigenvalues
+    arbitrarily close to it -- and proximity to the splitting line is exactly
+    what sets the sign iteration's cost and, past a point, its convergence.
+    """
+    G = np.random.default_rng(seed).standard_normal((n, n)) / np.sqrt(n)
+    return (G + G.T) / 2
+
+
+def test_matrix_sign_raises_rather_than_returning_an_unconverged_S():
+    """Running out of iterations must be an error, not a return value.
+
+    It previously returned (X, max_iter), which is indistinguishable from
+    converging on the last allowed iteration, so a non-converged S -- here
+    ||S^2 - I||/sqrt(n) = 3.4e-01, with a spectral count wrong by three --
+    propagated silently to the caller.
+    """
+    A = _near_symmetric(800)
+    mu = float(np.trace(A)) / A.shape[0]
+    with pytest.raises(np.linalg.LinAlgError):
+        matrix_sign(A - mu * np.eye(A.shape[0]))
+
+
+def test_sdc_survives_the_near_symmetric_case_it_cannot_split_at_the_centroid():
+    """The shift-retry loop is what makes the above survivable: sdc_eigvals
+    must still return the right spectrum even when the centred shift is
+    unusable, by retrying or falling back."""
+    A = _near_symmetric(300)
+    w = np.sort(np.real(sdc_eigvals(A)))
+    ref = np.sort(np.linalg.eigvalsh(A))
+    assert np.max(np.abs(w - ref)) / np.linalg.norm(A, 2) < 1e-10
+
+
+@pytest.mark.parametrize("n", [200, 400])
+def test_far_field_gate_preserves_the_sign_matrix(n):
+    """The far-field gate skips the X @ X gemm and tests the Newton update
+    norm instead. It is an efficiency change ONLY: S must still be an
+    involution and still report the same rank as a direct eigenvalue count.
+    """
+    G = np.random.default_rng(2).standard_normal((n, n)) / np.sqrt(n)
+    mu = float(np.trace(G)) / n
+    S, iters = matrix_sign(G - mu * np.eye(n))
+    assert np.linalg.norm(S @ S - np.eye(n)) / np.sqrt(n) < 1e-10
+    r = int(np.rint(np.trace(0.5 * (np.eye(n) + S))))
+    assert r == int(np.sum(np.linalg.eigvals(G).real > mu))

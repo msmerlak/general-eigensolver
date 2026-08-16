@@ -56,7 +56,10 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_switch=0.6, count=None):
     where the time goes.
 
     Requires A to have no eigenvalues on the imaginary axis; the caller
-    guarantees that by choosing (and if necessary perturbing) the shift.
+    guarantees that by choosing (and if necessary perturbing) the shift. When
+    one sits close enough that the iteration cannot converge within max_iter,
+    this raises LinAlgError rather than returning an unconverged S -- see the
+    note at the end of the loop.
     """
     n = A.shape[0]
     eye = np.eye(n)
@@ -74,30 +77,73 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_switch=0.6, count=None):
         return X, 0
     X /= nrm
 
+    # THE FAR-FIELD GEMM IS OPTIONAL. A far-field Newton step costs X @ X
+    # (2n^3) plus the LU and inverse (2n^3), and half of it is a gemm whose
+    # only job is to evaluate ||X^2 - I||. But Newton already builds the whole
+    # update, and
+    #
+    #     Delta = (X^-1 - X)/2 = X^-1 (I - X^2)/2,
+    #
+    # so the update norm is a convergence signal costing O(n^2) instead.
+    #
+    # Measured (Ginibre and near-symmetric, n=400 and 800): Delta tracks dev/2
+    # to two digits through the endgame, and Delta is never small while dev is
+    # large -- so gating on `delta_prev < ns_switch` reproduces the SAME
+    # Newton-Schulz entry point, with the same iteration counts, while forming
+    # X^2 once or twice instead of 8-11 times. X^2 is still built whenever the
+    # gate opens, because the NS step consumes it and the handoff wants the
+    # exact value rather than the proxy. `since_check` forces a real test every
+    # 8 iterations so a pathological Delta sequence cannot ride to max_iter
+    # without ever looking. (SSJ_LOG #30.)
+    delta_prev = np.inf
+    since_check = 0
+
     for it in range(1, max_iter + 1):
-        X2 = X @ X
-        if count is not None:
-            count["gemm"] += count["_w"]
-        dev = np.linalg.norm(X2 - eye, "fro") / np.sqrt(n)
-        if dev < tol:
-            return X, it
-        if dev < ns_switch:
-            # Newton-Schulz: 2 gemms, no factorization, quadratic.
-            X = X @ (1.5 * eye - 0.5 * X2)
+        if delta_prev < ns_switch or since_check >= 8:
+            since_check = 0
+            X2 = X @ X
             if count is not None:
                 count["gemm"] += count["_w"]
+            dev = np.linalg.norm(X2 - eye, "fro") / np.sqrt(n)
+            if dev < tol:
+                return X, it
+            if dev < ns_switch:
+                # Newton-Schulz: 2 gemms, no factorization, quadratic.
+                X = X @ (1.5 * eye - 0.5 * X2)
+                if count is not None:
+                    count["gemm"] += count["_w"]
+                delta_prev = 0.0        # stay in the endgame: NS needs X^2
+                continue
         else:
-            # Scaled Newton with determinantal scaling. One LU serves both
-            # the determinant and the inverse -- calling slogdet separately
-            # would factorize the same matrix twice.
-            Xi, logabsdet = _inv_and_logdet(X)
-            if not np.isfinite(logabsdet):
-                raise np.linalg.LinAlgError("singular iterate in sign function")
-            mu = np.exp(-logabsdet / n)
-            if count is not None:
-                count["inv"] += count["_w"]
-            X = 0.5 * (mu * X + Xi / mu)
-    return X, max_iter
+            since_check += 1
+
+        # Scaled Newton with determinantal scaling. One LU serves both the
+        # determinant and the inverse -- calling slogdet separately would
+        # factorize the same matrix twice.
+        Xi, logabsdet = _inv_and_logdet(X)
+        if not np.isfinite(logabsdet):
+            raise np.linalg.LinAlgError("singular iterate in sign function")
+        mu = np.exp(-logabsdet / n)
+        if count is not None:
+            count["inv"] += count["_w"]
+        Xnew = 0.5 * (mu * X + Xi / mu)
+        delta_prev = np.linalg.norm(Xnew - X, "fro") / np.sqrt(n)
+        X = Xnew
+        if not np.isfinite(delta_prev):
+            raise np.linalg.LinAlgError("divergent iterate in sign function")
+
+    # Running out of iterations is a FAILURE and must say so. It used to
+    # return (X, max_iter), which is indistinguishable from succeeding on the
+    # last allowed iteration, so a non-converged S propagated silently -- and
+    # it does happen: a near-symmetric n=800 matrix exits here with
+    # ||S^2 - I||/sqrt(n) = 3.4e-01 and a spectral count wrong by three
+    # (SSJ_LOG #30). `sdc_eigvals` already catches LinAlgError and retries
+    # with a different shift, which is exactly the right response, so raising
+    # routes this into the existing recovery path instead of downstream.
+    raise np.linalg.LinAlgError(
+        f"sign iteration did not converge in {max_iter} iterations "
+        f"(last update norm {delta_prev:.2e}); the shift is probably too "
+        f"close to an eigenvalue")
 
 
 def _spectral_norm(X, iters=20):

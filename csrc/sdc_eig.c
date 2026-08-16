@@ -233,9 +233,38 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     /* Ping-pong so the Newton-Schulz gemm never aliases its own input. */
     double *cur = X, *alt = ws->alt, *x2 = ws->x2;
 
+    /* THE FAR-FIELD GEMM IS OPTIONAL, and skipping it is the whole point here
+     * (SSJ_LOG #30). A far-field Newton step costs X^2 (2n^3) + dgetrf
+     * (2n^3/3) + dgetri (4n^3/3) = 4n^3, and HALF of that is a gemm whose only
+     * job is to evaluate ||X^2 - I||. But Newton already builds the update,
+     *
+     *     Delta = (X^-1 - X)/2 = X^-1 (I - X^2)/2,
+     *
+     * so its norm is a convergence signal available for O(n^2) -- it falls out
+     * of the same fused pass that writes the next iterate.
+     *
+     * Measured relation (Ginibre and near-symmetric, n=400 and 800): Delta
+     * tracks dev/2 to two digits through the whole endgame, and Delta is never
+     * small while dev is large, so gating on `delta_prev < ns_switch`
+     * reproduces the exact same Newton-Schulz entry point as testing dev every
+     * iteration -- while forming X^2 once or twice instead of 8-11 times.
+     *
+     * X^2 is still built whenever the gate opens, because the NS step consumes
+     * it and the handoff decision wants the exact value, never the proxy.
+     * `since_check` forces a real test every 8 iterations so a pathological
+     * Delta sequence cannot ride to max_iter without ever looking. */
+    double delta_prev = INFINITY;
+    int since_check = 0;
+
     int it = 0;
     int converged = 0;
     for (it = 1; it <= max_iter; it++) {
+        int check = (delta_prev < ns_switch) || (since_check >= 8);
+        if (!check) {                      /* far field: skip the 2n^3 gemm */
+            since_check++;
+            goto newton_step;
+        }
+        since_check = 0;
         scipy_dgemm_64_("N", "N", &n, &n, &n, &one, cur, &n, cur, &n, &zero,
                         x2, &n);
         double dev = dev_from_identity(x2, n) / sqn;
@@ -251,9 +280,16 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
                             alt, &n);
             double *t = cur; cur = alt; alt = t;
             if (st) st->n_ns++;
-        } else {
+            delta_prev = 0.0;      /* stay in the endgame: NS needs X^2 */
+            continue;
+        }
+
+    newton_step:
+        {
             /* Scaled Newton. One LU serves both the determinant and the
-             * inverse -- a separate slogdet would factorize twice. */
+             * inverse -- a separate slogdet would factorize twice. The fused
+             * pass that writes the next iterate also accumulates ||Delta||,
+             * which is the far-field convergence signal, for free. */
             memcpy(ws->lu, cur, nn * sizeof(double));
             scipy_dgetrf_64_(&n, &n, ws->lu, &n, ws->ipiv, &info);
             if (info != 0) return -1;              /* singular iterate */
@@ -266,8 +302,15 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
             if (info != 0) return -1;
             double mu = exp(-logabsdet / (double)n);
             double a = 0.5 * mu, b = 0.5 / mu;
-            for (size_t k = 0; k < nn; k++)        /* one fused pass */
-                cur[k] = a * cur[k] + b * ws->lu[k];
+            double ds = 0.0;
+            for (size_t k = 0; k < nn; k++) {      /* one fused pass */
+                double nx = a * cur[k] + b * ws->lu[k];
+                double d = nx - cur[k];
+                ds += d * d;
+                cur[k] = nx;
+            }
+            delta_prev = sqrt(ds) / sqn;
+            if (!isfinite(delta_prev)) return -1;
             if (st) st->n_newton++;
         }
     }
