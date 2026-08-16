@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #17)*
+*(rewritten each tick; as of attempt #18)*
 
 **The campaign's arc closed a loop.** Sixteen attempts of understanding-driven
 work on SSJ — divide-by-gap mechanics, the two-phase anatomy, the basin
@@ -39,10 +39,18 @@ tracking (GPU-only, #14) and the notebook carries both solvers' GPU
 questions: composed SSJ vs cuSOLVER, and now purification — whose every flop
 is gemm — as the third contender.
 
-**Open:** (1) the GPU run — sync the notebook (warm fixes #14 +
-`purify_eigh` as a cell); (2) polish purification's residual (a one-step
-subspace refinement against A would consult A again — the exact cure its
-frozen map lacks); (3) the convergence proof for SSJ, still unclaimed.
+**The two families compose (#18).** IPT's one weakness is needing a basin;
+purification's one weakness is never consulting A. Each is the other's cure:
+purification hands IPT a basis with ρ ≈ 0, and one IPT step (3 gemms) hands
+purification back the residual its frozen map cannot reach — 1e-13 → 3e-15
+on every spectrum. SP2's trace-branched squaring then cuts the split's
+substrate cost (one gemm + a trace per iteration, 1.3–1.4× on wall at equal
+gemm counts), with a free split-verification fallback covering its one
+fragility (ties exactly at μ sit at the purification fixed point ½).
+**Champion: 6.0–9.3× LAPACK at full accuracy (resid 3e-15).**
+
+**Open:** (1) the GPU run — sync the notebook (warm fixes #14 + a
+`purify_eigh` cell); (2) the convergence proof for SSJ, still unclaimed.
 
 ## What SSJ is, and where the cost sits
 
@@ -211,6 +219,7 @@ the tail-exclusion path fires.
 | 15 | **Re-measure the era-stale dead end**: deferred orthonormalization at 8-sweep economics | **dead end confirmed and upgraded** — it breaks the convergence certificate, not just the speed. The retraction is also the stopping test's meaning. |
 | 16 | **Is IPT the only pure-gemm endgame?** (user steer) — map the families; prove ρ(p(B)) invariance; measure the purification recursion end to end | **basin invariance proven + verified; purification loses 1.3× on CPU at full accuracy — the strong second family, GPU-shaped.** |
 | 17 | **Close purification's gap**: randomized extraction, leaf tuning, mixed purify | **NEW CPU CHAMPION — 8.3×/9.9× LAPACK** (vs composed SSJ 12×/16×), shipped as `purify_eigh` + tests. Mixed purify refuted with mechanism: the map freezes subspace error. |
+| 18 | **Compose the families**: one IPT step polishes the purified basis; SP2 replaces McWeeny; split-verification fallback | **champion at full accuracy: 6.0–9.3× LAPACK, resid 3e-15.** Suite caught SP2×degeneracy; safety net free on the happy path. |
 
 ### 1. SSJ-BC — verified
 
@@ -1198,3 +1207,52 @@ Shipped as `ssj.purify_eigh` (deterministic by default, LAPACK fallback when
 the spectrum refuses to split at the mean), 165 tests pass (3 new). The
 notebook sync — #14's warm fixes plus a `purify_eigh` cell — is now the last
 engineering item before the GPU run decides all three contenders at once.
+
+### 18. The families compose: IPT polishes purification, SP2 cuts its cost
+
+#17 left two open flanks: residuals at ~1e-11 and the McWeeny split cost.
+Both closed, and the closure is the campaign's thesis in miniature — each
+family's weakness is exactly the other's strength.
+
+**The IPT polish.** Purification's structural flaw (#17): the map never
+consults A after the seed, so split-boundary subspace mixing survives to the
+answer. IPT is *nothing but* consulting A — and in the purified basis
+ρ ≈ 1e-11 ≪ 1, deep inside its basin. One step, 3 gemms + elementwise, with
+a guard zeroing corrections whose denominator is under 1e3× the coupling
+(inside clusters the subspace is already invariant):
+
+| spectrum | resid before | after |
+|---|---|---|
+| GOE n=800 | 2.4e-13 | **3.1e-15** |
+| clustered 1e-9 n=400 | 1.5e-13 | 2.9e-15 |
+| 5-fold deg n=200 | 1.4e-13 | 2.8e-15 |
+
+Full LAPACK-grade accuracy; the #17 caveat is gone.
+
+**SP2 replaces McWeeny.** Niklasson's trace-branched squaring (P ← P² or
+2P − P²) does one gemm + a trace per iteration against McWeeny's two gemms
+plus temporaries. Gemm counts barely move (55 vs 59) — **the 1.3–1.4× wall
+win is substrate, not flops**, consistent with #13: fewer n² temporaries per
+gemm issued.
+
+**The suite caught what the tick script missed.** SP2 × exact degeneracy
+broke (resid 0.30): eigenvalues exactly at μ sit at the purification fixed
+point ½, and the trace branch mis-ranks, cutting inside a degenerate
+cluster. My race script never ran that combination — `test_purify_eigh_hard_
+spectra` did. Fix: a split-verification fallback, free on the happy path (B
+is already formed — check ‖B₂₁‖ and fall back to `eigh` on a bad split).
+Fifth member of the measurement-lesson family: a new code path needs the
+full spectrum battery, not the benchmark's spectra.
+
+**Shipped champion, verified post-ship** (n=800 clean at 1.6%; n=400 row
+contaminated at 14.6% and quoted from the earlier clean run):
+
+| | n=400 | n=800 |
+|---|---|---|
+| `purify_eigh` (SP2 + polish) | **87.7 ms = 6.2×** | **516–672 ms = 8.3–9.3×** |
+| composed SSJ | 181.5 ms = 12.9× | 879–1246 ms = 15.4–15.8× |
+
+Eigenvalues 4.5–5.9e-15, residuals 2.4–3.1e-15. 165 tests pass. The
+campaign's CPU standing has moved 28–42× → 16–18× (SSJ line, attempts 1–15)
+→ **6–9× at full accuracy** (purification line, attempts 16–18, from one
+steered question). The notebook sync is the last engineering item.

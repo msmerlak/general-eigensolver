@@ -138,7 +138,60 @@ def purify_split(A, mu, tol=1e-12, count=None):
     return B[:r, :r], B[r:, r:], r, resid
 
 
-def purify_eigh(A, leaf=None, tol=1e-12, rng=None):
+def _sp2_projector(A, mu, tol=1e-12, max_iter=100, warmup=6):
+    """Projector onto eigenvalues below mu: McWeeny warmup, then SP2.
+
+    SP2 (Niklasson): P <- P^2 or 2P - P^2, branched on the trace against the
+    target rank -- ONE gemm per iteration against McWeeny's two, with far
+    less elementwise baggage per gemm (measured 1.3-1.4x on the whole split
+    even though the gemm count barely moves, 55 vs 59). The McWeeny warmup
+    runs until round(trace) is trustworthy as the rank.
+    """
+    n = A.shape[0]
+    lo, hi = _bounds(A)
+    c = 0.5 / max(hi - mu, mu - lo, 1e-300)
+    P = -c * A
+    P.flat[:: n + 1] += 0.5 + c * mu
+    for _ in range(warmup):
+        P2 = P @ P
+        P = 3.0 * P2 - 2.0 * (P @ P2)
+    r = float(np.rint(np.trace(P)))
+    for _ in range(max_iter):
+        P2 = P @ P
+        if float(np.linalg.norm(P2 - P, "fro")) < tol * np.sqrt(n):
+            break
+        P = P2 if np.trace(P) - r > 0 else 2.0 * P - P2
+    return P, int(r)
+
+
+def _ipt_polish(A, w, V):
+    """One IPT step in the (nearly) eigen-basis: 3 gemms + elementwise.
+
+    Purification's structural flaw is that its map never consults A after
+    the seed (any projector is a fixed point), so split-boundary subspace
+    mixing survives to the answer as a ~1e-13..1e-11 residual. IPT is
+    nothing but consulting A, and in the purified basis rho ~ 0, so one
+    step lands the residual at ~3e-15 -- family 1 polishing family 2.
+    Near-degenerate pairs are guarded: a tiny denominator under a tiny
+    coupling is noise (inside a cluster the subspace is already invariant).
+    """
+    B = V.T @ (A @ V)
+    B = (B + B.T) / 2.0
+    d = np.diag(B).copy()
+    W = B - np.diag(d)
+    gap = d[None, :] - d[:, None]
+    np.fill_diagonal(gap, 1.0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        C = W / gap
+    C[np.abs(gap) < 1e3 * np.abs(W)] = 0.0
+    np.fill_diagonal(C, 1.0)
+    V2 = V @ C
+    V2 /= np.linalg.norm(V2, axis=0, keepdims=True)
+    order = np.argsort(d, kind="stable")
+    return d[order], V2[:, order]
+
+
+def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True):
     """Full symmetric eigendecomposition by recursive purification bisection.
 
     The OTHER pure-gemm family (SSJ_LOG #16-17): iterate on the MATRIX, not a
@@ -150,10 +203,11 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None):
     recurses. Leaves fall to LAPACK `eigh` -- the same reliance the SSJ block
     schedule has on batched `eigh`.
 
-    Measured (SSJ_LOG #17, clean box): 8.3x LAPACK at n=400 and 9.9x at
-    n=800, against the composed SSJ solver's 12.0x / 16.0x -- the fastest
-    full solver in this repository on CPU, and structurally the most
-    GPU-shaped: every flop outside the leaves is a full-rate gemm.
+    Measured (SSJ_LOG #17-18, clean box): 6.2x LAPACK at n=400 and 8.3x at
+    n=800 with the SP2 projector and the final IPT polish, against the
+    composed SSJ solver's 12.9x / 15.4x -- the fastest full solver in this
+    repository on CPU, at full accuracy (residual ~3e-15), and structurally
+    the most GPU-shaped: every flop outside the leaves is a full-rate gemm.
 
     Two measured boundaries (do not "fix" without re-measuring):
     * precision="mixed" purification CANNOT work: the map never consults A
@@ -178,8 +232,7 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None):
     if n <= leaf:
         return np.linalg.eigh(A)
     mu = float(np.trace(A).real) / n
-    P, _ = spectral_projector(A, mu, tol=tol)
-    r = int(np.rint(np.trace(P).real))
+    P, r = _sp2_projector(A, mu, tol=tol)
     if r <= 0 or r >= n:  # spectrum did not split at the mean: fall back
         return np.linalg.eigh(A)
     G = rng.standard_normal((n, n))
@@ -189,11 +242,20 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None):
     Q = np.linalg.qr(Y)[0]
     B = Q.T @ (A @ Q)
     B = (B + B.T) / 2.0
-    w1, V1 = purify_eigh(B[:r, :r], leaf, tol, rng)
-    w2, V2 = purify_eigh(B[r:, r:], leaf, tol, rng)
+    # Safety net, free on the happy path (B is already formed): eigenvalues
+    # exactly AT mu sit at the purification fixed point 1/2, where SP2's
+    # trace branch can mis-rank and cut inside a degenerate cluster. A bad
+    # split shows up as off-block mass; fall back to the dense solver then.
+    if np.linalg.norm(B[r:, :r], "fro") > 1e-8 * np.linalg.norm(A, "fro"):
+        return np.linalg.eigh(A)
+    w1, V1 = purify_eigh(B[:r, :r], leaf, tol, rng, polish=False)
+    w2, V2 = purify_eigh(B[r:, r:], leaf, tol, rng, polish=False)
     V = np.empty((n, n))
     V[:, :r] = Q[:, :r] @ V1
     V[:, r:] = Q[:, r:] @ V2
     w = np.concatenate([w1, w2])
     order = np.argsort(w, kind="stable")
-    return w[order], V[:, order]
+    w, V = w[order], V[:, order]
+    if polish:
+        w, V = _ipt_polish(A, w, V)  # once, at the top level only
+    return w, V
