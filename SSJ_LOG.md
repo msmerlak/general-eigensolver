@@ -1511,7 +1511,7 @@ carries as a *per-case documented bar* rather than silently tightening.
 
 **The verdict on #13, stated honestly: half right.** ~1.3× of the gap was
 implementation and is now recovered. The rest is not — and the shape of the
-残り says why: **the ratio grows with n (3.3 → 4.3 → 5.2)**, so this is not a
+remainder says why: **the ratio grows with n (3.3 → 4.3 → 5.2)**, so this is not a
 constant implementation tax but the algorithm's own asymptotics losing to
 dsyevd's improving constant. The purification recursion does O(n³) work per
 split with a large constant (~55 sgemms) plus two O(n³) LAPACK leaves;
