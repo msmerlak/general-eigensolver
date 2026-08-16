@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #15)*
+*(rewritten each tick; as of attempt #16)*
 
 **Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
 saturation. **Two phases**: spread-limited globalization (injectable — the
@@ -49,10 +49,28 @@ reuse** (#14: "expected 8 sweeps" came from the chained prototype, not the
 in-solver path — comparing across code eras manufactured a phantom
 regression).
 
-**Open:** (1) the GPU run — the notebook needs one small sync (the two #14
-warm fixes) and then everything measurable on this box is done; tracking is
-provably GPU-only; (2) a convergence proof — now the only item on this list
-that is not an engineering task.
+**IPT is not the only pure-gemm endgame — but its basin is invariant (#16).**
+Two families iterate to spectral objects in pure gemm: divide-by-gap fixed
+points on the *basis* (IPT, BW — linear, basin ρ<1, column-separable) and
+polynomial flows on the *matrix* (sign/purification — quadratic, basin
+GLOBAL, delivers splits, recursed to a full solve). A third relative
+(LU-normalized subspace iteration) trades the manifold for a triangle but
+converges at modulus ratios — useless here. And the tempting bridge —
+running IPT on p(B) to respace the spectrum — is closed by a small theorem:
+by Daleckii–Krein the divided difference that transports the coupling IS the
+factor by which the gap moves, so ρ(p(B)) = ρ(B) + O(W²) for every analytic
+p; verified to 1.000 numerically. The basin can't be bought by spectral
+surgery, joining ρ's diagonal-similarity invariance.
+
+**The purification recursion, measured end to end (#16):** 1.3× behind the
+composed SSJ on CPU (21.7× vs 16.5× LAPACK at n=800) at full accuracy — a
+remarkably strong second family, losing only to per-call overhead and
+pivoted-QR extraction (both fixable: randomized range-finder = 2 gemms), and
+structurally the most GPU-shaped solver in the repo.
+
+**Open:** (1) the GPU run — the notebook needs one small sync (the #14 warm
+fixes), and the purification recursion is now a candidate cell for it too;
+(2) a convergence proof — the only non-engineering item left.
 
 ## What SSJ is, and where the cost sits
 
@@ -219,6 +237,7 @@ the tail-exclusion path fires.
 | 13 | **Audit the floor claim**: decompose measured-vs-modelled per component; test symmetric BLAS (syrk/syr2k, BLAS-level CholeskyQR2) | **floor claim corrected — algorithm is ~2–3× LAPACK in flop units; substrate ~6×, not reclaimable from Python on this stack.** scipy/numpy BLAS mismatch caught by control. |
 | 14 | **Tracking**: warm-start crossover chart; schedule-head and entry-QR defects | **the CPU tracking niche is dead — warm never beats LAPACK here** (2.6× at best). Two warm-path fixes shipped; niche relocated to GPU, where the notebook tests it. |
 | 15 | **Re-measure the era-stale dead end**: deferred orthonormalization at 8-sweep economics | **dead end confirmed and upgraded** — it breaks the convergence certificate, not just the speed. The retraction is also the stopping test's meaning. |
+| 16 | **Is IPT the only pure-gemm endgame?** (user steer) — map the families; prove ρ(p(B)) invariance; measure the purification recursion end to end | **basin invariance proven + verified; purification loses 1.3× on CPU at full accuracy — the strong second family, GPU-shaped.** |
 
 ### 1. SSJ-BC — verified
 
@@ -1101,3 +1120,64 @@ price of three things at once — the manifold, the saturation geometry, and
 the termination test's meaning. With this, every engineering item measurable
 on this box is closed or shipped; the open list is the GPU run (one small
 notebook sync pending) and the convergence proof.
+
+### 16. The other pure-gemm family — and a small invariance theorem
+
+Steered by a direct question: is IPT really the only gemm-only iteration
+whose fixed points are eigenvectors? Answer: no — there are exactly two
+families in play, plus a bridge between them that a short argument closes.
+
+**The map of the space.** (1) *Divide-by-gap fixed points on the basis*:
+IPT and Brillouin–Wigner (both shipped) — one gemm per iteration, linear at
+rate ρ, basin ρ < 1, column-separable. (2) *Polynomial flows on the matrix*:
+McWeeny purification P ← 3P² − 2P³ / matrix sign (both shipped, ledger
+#20–21, but only ever measured against `dgeev` on the nonsymmetric side) —
+two gemms per iteration, **quadratic, global basin** (the initial scaling
+traps the spectrum in [0,1]), delivering an invariant-subspace split per run,
+recursed to a full decomposition. (3) A structural relative, LU-normalized
+subspace iteration (treppeniteration): pins a triangle instead of pinning
+v_jj or keeping a manifold — but converges at eigenvalue-modulus ratios,
+hopeless for GOE-like spectra, and its LU is a factorization anyway. Not
+pursued.
+
+**The bridge is closed by an invariance.** Running IPT on p(B) (any
+polynomial — gemm-only, eigenvector-preserving) looks like a free basin
+widener. It is not: for B = D + W, Daleckii–Krein gives
+(p(B))_ij ≈ p[d_i,d_j]·W_ij, and the gap moves by exactly the same divided
+difference, |p(d_j) − p(d_i)| = |p[d_i,d_j]|·gap_ij. **The factor that
+transports the coupling is the factor that transports the gap**, so
+ρ(p(B)) = ρ(B) + O(W²) for every analytic p. Verified on real SSJ-trajectory
+frames: ratios exactly 1.000 at small W for shifted-square, shifted-cube and
+Chebyshev T₃; erratic (0.19–300, frame-dependent, unusable) at large W; and
+the predicted failure mode appears on cue — pairs with p′ ≈ 0 between them
+(d_i + d_j ≈ 2c under squaring) lose gap and coupling together and O(W²)
+blows ρ up 179×. This joins "ρ(J) is a diagonal-similarity invariant" in the
+mechanism list: **the basin can be bought by rotation (SSJ sweeps), never by
+spectral surgery.**
+
+**The purification recursion, end to end** (prototype: split at trace/n,
+recurse to leaf 64, leaf = `eigh`, vectors by two column-block gemms per
+level; accuracy asserted):
+
+| | purify-recursion | composed SSJ | LAPACK |
+|---|---|---|---|
+| n=800 wall | 1498 ms (21.7×) | **1139 ms (16.5×)** | 69 ms |
+| accuracy | 5.4e-15 / ortho 7.9e-14 | 5.8e-15 | — |
+
+Degeneracy and 1e-9 clusters come out clean (leaves absorb them). **The
+composed SSJ keeps the CPU crown by 1.3×** — but the margin is small for a
+first prototype, and the loser's fat is identifiable: 15 pivoted QRs (dgeqp3;
+replaceable by a randomized range-finder, i.e. two more gemms) and per-call
+overhead at small recursion levels. A model-vs-measure correction for the
+record: my per-split extrapolation ("~79 gemm-equivalents") conflated gemm
+*count* with size-weighted cost — the recursion issues 798 gemm calls whose
+small members are overhead-bound; size-weighted the model was right, wall is
+what decides.
+
+**Why this matters beyond the scoreboard:** purification is the one solver
+family here whose every flop is a full-rate gemm with a *global* basin — no
+manifold, no retraction, no gate, no certificate subtlety (the projector IS
+the certificate: trace and idempotency are frame-independent). On the GPU it
+is the natural competitor to both cuSOLVER and composed SSJ, and it is now a
+candidate cell for the notebook. No core code shipped this tick; prototype
+in scratchpad.
