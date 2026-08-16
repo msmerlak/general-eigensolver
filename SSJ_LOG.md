@@ -118,7 +118,7 @@ found load-bearing:
 |---|---|
 | `prologue=k` (unshifted QR steps first) | graded/decaying spectra 45 → 5 sweeps; nothing on flat spectra |
 | `precision="mixed"` | ~1.3–1.4× on CPU; more on tensor-core GPUs |
-| `X0=` warm start | tracking a perturbed matrix: 1–5 sweeps |
+| `X0=` warm start | 1–5 sweeps on a perturbed matrix — but on CPU this never beats a LAPACK re-solve (#14); the tracking case is GPU-only |
 | `method="gemm"` | factorization-free; ~2× flops at equal sweeps, all gemm |
 | adaptive Newton–Schulz endgame | replaces QR once ‖K‖_F < ½ |
 
