@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #21)*
+*(rewritten each tick; as of attempt #22)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -44,6 +44,20 @@ can cut *through* a 1e-9 cluster it cannot see, caught by a free post-hoc
 boundary audit (the boundary gap is known after recursion) with an `eigh`
 fallback. **Champion now 4.4×/5.3×/6.7× LAPACK at n=400/800/1600, residuals
 1.3e-15–2.0e-13.**
+
+**The champion has no unnecessary steps on this substrate (#22).** Four
+existence-level cuts tried, three refuted with mechanisms: the all-fp32
+split pipeline (sgeqrf runs at dgeqrf speed — ambush #7 — so fp32 QR saves
+nothing and the casts cost, while accuracy drops); inertia-exact rank via
+sytrf replacing the McWeeny warmup (ssytrf costs as much as the warmup it
+replaces); a conditional second polish (its cheap signal — orthogonality
+defect — is NOT a residual estimate; skipping by it broke the battery). One
+survived at noise level (bounds 15 → 7 power iterations). The crisp law
+underneath: **on this stack, reduced precision pays only through gemm** —
+sgemm is 2× dgemm, but ssyevd, sgeqrf and ssytrf all run at fp64 speed —
+which is exactly why the SP2 phase (pure gemm) is the only place mixed
+precision ever bought anything here, and why tensor-core substrates change
+every one of these verdicts at once.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -229,6 +243,7 @@ the tail-exclusion path fires.
 | 19 | **fp32 splits + the refinement ladder** (consult-A polish ⟂ NS re-orth, alternating) | **champion again: 4.9×/6.7× LAPACK shipped as `precision="mixed"`.** The polish alone floors at err² — the interleaved NS step restores quadratic refinement. |
 | 20 | **Rethink the structure**: is the ladder the whole algorithm? Measure its basin; test fp32-LAPACK coarse | **structure settled: coarse (≲1e-4, precision-free) + ladder (last digits). Basin is SMALL (stalls from 1e-2), ssyevd = dsyevd here (ambush #6). `refine_eigh` shipped as the reusable half.** |
 | 21 | **Optimize the champion**: profile-driven batch (tight bounds, in-place SP2, in-place polish, drop trailing NS, cached G) + two new guards | **4.4×/5.3×/6.7× LAPACK at n=400/800/1600 (from 4.9×/6.7×), all clean runs, full accuracy.** |
+| 22 | **Cut unnecessary steps**: all-fp32 pipeline, inertia rank, conditional polish, bounds trim | **minimality verdict — three cuts refuted with mechanisms, one at noise level. Every surviving step earns its place; CPU optimization is converged.** |
 
 ### 1. SSJ-BC — verified
 
@@ -1401,3 +1416,50 @@ G 7.5. The batch, in profile order:
 Residuals 1.3e-15 / 1.7e-15 / 2.0e-13. First n=1600 measurement of the
 campaign. 168 tests pass. Cold-CPU arc: 28–42× → 16–18× → 6–9× → 4.9–6.7× →
 **4.4–6.7× across a 4× size range.**
+
+### 22. The minimality audit — every remaining step earns its place
+
+Steered: cut unnecessary steps. Four candidates where a step's *existence*
+was questionable. Three died with mechanisms, one survived at noise level.
+
+**Cut 1 — run the whole split pipeline in fp32** (Y-fill, extraction QR,
+B-form; the ladder digests 1e-7-class error, so fp64 exactness there looks
+wasted). Refuted twice over: it measured *slower* (113 vs 53 ms at n=400)
+and less accurate. The speed: **sgeqrf runs at dgeqrf speed on this box
+(1.00×) — substrate ambush #7**, extending #6's ssyevd finding; fp32 QR
+saves nothing and the casts cost. The accuracy: the fp64 QR of
+[P·G₁, (I−P)·G₂] is *load-bearing exactness* — it manufactures an exactly
+orthogonal split basis out of an inexact projector, hiding P's fp32 defect
+from everything downstream. Make it fp32 and the defect leaks through.
+
+**Cut 2 — replace the McWeeny warmup with an exact rank from Sylvester
+inertia** (one ssytrf; the warmup's only job is making round(trace)
+trustworthy). The inertia count is exact on every spectrum tested — and
+useless here: ssytrf costs as much as the 12 sgemms it replaces (32 vs
+~30 ms at n=800; more at n=400). Correct idea, wrong substrate.
+
+**Cut 3 — conditional second polish pair.** The free signal available after
+pair 1 (orthogonality defect of V) measures the wrong thing: it sits at
+(input err)² ≈ 1e-14 even when the *residual* still needs the second pair.
+Skipping on it broke three of five battery rows. A residual-aware skip would
+need the polish to export its own correction norm — possible, not free, not
+worth it against a ~30 ms step.
+
+**Cut 4 — bounds at 7 power iterations instead of 15**: survived (the 25%
+inflation and the divergence guard already bracket the estimate), measured
+within noise. Kept.
+
+**The law underneath, stated once: on this stack, reduced precision pays
+only through gemm.** sgemm is 2× dgemm, but ssyevd (#20), sgeqrf (#22) and
+ssytrf (#22) all run at fp64 speed. Every place the campaign's mixed
+precision ever won — SSJ's fp32 sweeps, SP2's fp32 projector — is a place
+where the flops were pure gemm. Every place it lost is a factorization.
+Tensor-core substrates invert all of these verdicts simultaneously, which
+is what the notebook exists to measure.
+
+**Verdict: CPU optimization of the champion is converged.** The pipeline —
+7-iteration bounds, fp32 SP2 with guards, fp64 randomized extraction, fp64
+B-form, LAPACK leaves, two-pair ladder with mid NS, three safety nets — has
+no removable step and no substitutable kernel left on this substrate.
+53.7 / 300.4 ms (4.2× / 5.3× LAPACK) at n=400/800, full accuracy, clean
+runs. 168 tests pass. What remains is the GPU notebook and the proof.

@@ -45,10 +45,15 @@ def _bounds(A, iters=30):
     return float(np.min(d - r)), float(np.max(d + r))
 
 
-def _bounds_tight(A, iters=15):
+def _bounds_tight(A, iters=7):
     """Near-tight symmetric bounds: power iteration on A^2 (robust to the
     +-lambda near-ties of flat spectra), inflated 25%, clipped to the
     Gershgorin enclosure.
+
+    Seven iterations suffice: the estimate only seeds a slope that the 25%
+    inflation and the SP2 divergence guard (with its Gershgorin retry)
+    already bracket -- 15 iterations bought ~10 ms of matvecs for accuracy
+    the pipeline never needed.
 
     Why it exists: Gershgorin measured 12.5x loose on GOE n=800, and the
     SP2 seed slope is inversely proportional to the enclosure width, so a
