@@ -86,6 +86,15 @@ static double *xmalloc_d(size_t k) {
     return p;
 }
 
+/* Handoff threshold from scaled Newton to Newton-Schulz, on
+ * ||X^2 - I||_F/sqrt(n). Newton-Schulz for the sign function converges only
+ * inside ||I - X^2|| < 1, so 1.0 is a hard ceiling in the operator norm; this
+ * measure is normalized by sqrt(n) and is therefore not that norm, which is
+ * exactly why the useful value is measured rather than derived. */
+static double g_ns_switch = 0.6;
+void sdc_set_ns_switch(double v) { g_ns_switch = v; }
+double sdc_get_ns_switch(void) { return g_ns_switch; }
+
 /* Deterministic xorshift, so shift retries are reproducible run to run. */
 static uint64_t g_rs = 0x5D1ULL;
 static double rnd_normal(void) {
@@ -268,7 +277,7 @@ static bi split_once(const double *A, bi n, double shift, double tol,
     for (bi i = 0; i < n; i++) ws->cur[IDX(i, i, n)] -= shift;
 
     double t0 = now_s();
-    int its = matrix_sign_c(ws->cur, n, tol, 0.6, 60, ws, st);
+    int its = matrix_sign_c(ws->cur, n, tol, g_ns_switch, 60, ws, st);
     if (st) { st->t_sign += now_s() - t0; st->n_sign_calls++; }
     if (its == -1) { if (st) { st->n_fail_singular++; } return -2; }
     if (its < 0) {                       /* ran out of iterations */
@@ -472,7 +481,7 @@ int matrix_sign_bench(const double *A, bi n, double shift, sdc_stats *st) {
     size_t nn = (size_t)n * (size_t)n;
     memcpy(ws.cur, A, nn * sizeof(double));
     for (bi i = 0; i < n; i++) ws.cur[IDX(i, i, n)] -= shift;
-    int its = matrix_sign_c(ws.cur, n, 1e-12, 0.6, 60, &ws, st);
+    int its = matrix_sign_c(ws.cur, n, 1e-12, g_ns_switch, 60, &ws, st);
     ws_free(&ws);
     return its;
 }

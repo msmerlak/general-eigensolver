@@ -44,4 +44,11 @@ void lapack_eig_c(const double *A, int64_t n, double *wr, double *wi);
 /* One isolated sign evaluation, for attribution. Returns iterations, or -1. */
 int matrix_sign_bench(const double *A, int64_t n, double shift, sdc_stats *st);
 
+/* Threshold on ||X^2 - I||_F/sqrt(n) below which the sign iteration hands off
+ * from scaled Newton to Newton-Schulz. Exposed so it can be swept rather than
+ * asserted: a Newton step (gemm + dgetrf + dgetri) and an NS step (two gemms)
+ * cost about the same 4n^3, but only NS is pure gemm. Default 0.6. */
+void sdc_set_ns_switch(double v);
+double sdc_get_ns_switch(void);
+
 #endif /* SDC_EIG_H */
