@@ -90,8 +90,23 @@ static double *xmalloc_d(size_t k) {
  * ||X^2 - I||_F/sqrt(n). Newton-Schulz for the sign function converges only
  * inside ||I - X^2|| < 1, so 1.0 is a hard ceiling in the operator norm; this
  * measure is normalized by sqrt(n) and is therefore not that norm, which is
- * exactly why the useful value is measured rather than derived. */
-static double g_ns_switch = 0.6;
+ * exactly why the useful value is measured rather than derived.
+ *
+ * 0.9 measured best at n=200 and n=400 and within noise of best at n=800,
+ * and is never worse than the previous 0.6 anywhere in a sweep over
+ * {0.6, 0.8, 0.9, 0.95, 1.0, 1.1, 1.3, 1.6}. But the honest size of the win
+ * is 3-5%, which overlaps this box's contamination band -- record it as
+ * noise-level, not as a result.
+ *
+ * THIS PARAMETER IS NOT A LEVER, and that is the real finding (SSJ_LOG #29).
+ * The iteration converges quadratically, so dev crosses the entire disputed
+ * band in one or two steps: of 16 steps at n=800, exactly 2 land in
+ * [0.6, 1.6]. There is almost nothing there to reassign no matter where the
+ * threshold sits. Past 1.0 it gets monotonically WORSE (0.66x -> 0.60x at
+ * n=800) because NS entered outside its region converges slowly and the step
+ * count grows 6 -> 12. The sign iteration's cost is set by the 8-11 steps
+ * spent FAR from convergence, where only Newton works. */
+static double g_ns_switch = 0.9;
 void sdc_set_ns_switch(double v) { g_ns_switch = v; }
 double sdc_get_ns_switch(void) { return g_ns_switch; }
 

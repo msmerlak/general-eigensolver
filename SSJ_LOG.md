@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #28)*
+*(rewritten each tick; as of attempt #29)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -145,9 +145,12 @@ where one was needed** — not a rejected shift, as #27 guessed, but a leaf of
 exactly n/2 sitting just under `r = trace(P)`. Leaf 3n/5 takes the C solver
 to **0.60×/0.67×/0.65× dgeev** and the Python one from 412 to 207 ms at
 n=200. What remains is the sign function itself: one evaluation costs
-0.77–1.02× an entire dgeev solve, and the flop model says the opening is the
-Newton/Newton–Schulz switch, since both steps cost 4n³ but only NS is pure
-gemm.
+0.77–1.02× an entire dgeev solve. The Newton/Newton–Schulz switch looked like
+the opening — both steps cost 4n³ but only NS is pure gemm — and **#29
+refuted it**: quadratic convergence crosses the whole disputed band in 1–2 of
+16 steps, so no threshold can reassign work that is not there. The cost is
+the 8–11 steps spent FAR from convergence, whose count is set by how close
+eigenvalues sit to the splitting line.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -337,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 29 | **Cheapen the sign iteration** via the Newton→Newton-Schulz threshold (#28's named target) | **refuted, with the trajectory.** Quadratic convergence crosses the whole disputed band in 1–2 of 16 steps, so there is nothing to reassign; past 1.0 it degrades. 0.9 shipped at noise level (3–5%). Real cost is the 8–11 far-field steps. |
 | 28 | **Improve the C SDC** — instrument the shift guards, then the leaf | **the #27 diagnosis was a guess and was wrong: ZERO shifts are ever rejected.** The second sign call is a second split, caused by leaf = n/2 landing just under r = trace(P). Leaf 3n/5: **0.60×/0.67×/0.65× dgeev** (C), 412→207 / 1315→748 ms (Python). |
 | 27 | **SDC in a compiled language** (user request) — `csrc/sdc_eig.c`, same OpenBLAS | **0.56×/0.61×/0.61× dgeev at n=200/400/800, from Python's 0.07×/0.13× — a 5–8× implementation gain.** #25's ledger was right; NumPy was the whole gap. Sign is 66–71%, and one wasted shift retry is ~1/3 of the run. |
 | 26 | **Can IPT run on the separated eigenvalues while another algorithm takes the rest?** (user question) — column split, shipped as `ipt_hybrid_eigh` | **yes, and exactly: 1.3e-15–8.6e-15 where plain IPT fails at 7e-07–1e-04.** Speed is parity (0.97–1.08×) — the split buys ADMISSION, not throughput. Screen is a SAFETY property: unscreened, two columns converge to the *same* eigenpair. `ipt_rate_columns` vectorized, bit-identical, 2.4–4.6×. |
@@ -1964,3 +1968,75 @@ is two factorizations that do not run at gemm rate — so at equal flops NS
 should be wall-cheaper, and the switch threshold `ns_switch = 0.6` is
 probably conservative. At n=800 the run spends 10 Newton steps against 6 NS.
 Sweeping that threshold is the next tick and it is a one-parameter job.
+
+### 29. The Newton/Newton-Schulz threshold is not a lever — refuted with the trajectory
+
+**The prediction, from #28's flop model.** A scaled-Newton step costs one gemm
+(X², needed for the convergence test anyway) plus `dgetrf` + `dgetri`
+(2n³/3 + 4n³/3); a Newton–Schulz step costs that same gemm plus one more.
+Both ≈ 4n³. But only NS is pure gemm, while Newton is two factorizations that
+do not run at gemm rate — so at equal arithmetic NS should be wall-cheaper,
+and the shipped handoff at `dev = 0.6` should be leaving gemms on the table.
+Sign is 54–61% of the run, so this looked like the best-value single knob.
+
+**Swept, and the prediction is essentially wrong.** Eight thresholds
+{0.6, 0.8, 0.9, 0.95, 1.0, 1.1, 1.3, 1.6} × three sizes, accuracy asserted
+before every timing:
+
+```
+        n=200            n=400            n=800
+ 0.60   0.55x  11N/4NS   0.67x  8N/4NS    0.66x  10N/6NS
+ 0.90   0.58x  10N/5NS   0.70x  7N/6NS    0.66x  10N/6NS
+ 0.95   0.58x  10N/5NS   0.70x  7N/6NS    0.68x  10N/6NS
+ 1.10   0.56x  10N/6NS   0.68x  7N/7NS    0.65x  10N/8NS
+ 1.60   0.55x  10N/7NS   0.66x  7N/8NS    0.60x  10N/12NS
+```
+
+At n=800 the Newton count **does not move at all** across the entire sweep,
+and past 1.0 everything gets monotonically worse.
+
+**Why, shown directly rather than inferred.** The tell was that raising the
+threshold added NS steps without removing Newton steps, so I printed the
+`dev = ‖X²−I‖_F/√n` trajectory of a pure-Newton run:
+
+```
+n=400:  1.03 72.1 37.3 10.3 8.05 3.21 2.51 0.767
+        0.121 3.82e-3 5.96e-6 1.52e-11 8.41e-14      13 steps, 2 in [0.6,1.6]
+n=800:  1.03 764  565  139  36.8 10.0 3.26 1.57
+        6.14 1.76 0.560 0.214 1.19e-2 4.52e-5 6.41e-10 1.84e-13
+                                                      16 steps, 2 in [0.6,1.6]
+```
+
+**The iteration converges quadratically, so it crosses the entire disputed
+band in one or two steps.** Of 16 steps at n=800, exactly 2 land in
+[0.6, 1.6] — there is nothing there to reassign, wherever the threshold sits.
+Past 1.0, NS entered outside its convergence region converges slowly and the
+step count grows 6 → 12, which is the monotone degradation above.
+
+**What the trajectory shows instead, and it is the real target.** The cost is
+the **8–11 steps spent FAR from convergence**, where dev runs 10¹–10², only
+Newton works, and the sequence is not even monotone (n=800 goes
+1.57 → 6.14 → 1.76). Two things stand out and neither is the threshold:
+the first Newton step *blows dev up* from 1.03 to 764, because shifting by
+the centroid leaves the iterate near-singular and X⁻¹ dominates the average;
+and the far-field step count is governed by how close eigenvalues sit to the
+splitting line. For a Ginibre spectrum — a disk about the origin — **every**
+vertical line cuts through the bulk, so this is not a tuning problem. The
+levers are the scaling/shift strategy or a higher-order far-field map
+(Halley, Padé), not the handoff point.
+
+**Shipped anyway, labelled honestly: 0.9.** It measured best at n=200 and
+n=400, within noise of best at n=800, and is never worse than 0.6 anywhere in
+the sweep. But the win is 3–5%, which overlaps this box's 0.4–3.0%
+contamination band. **Recorded as noise-level, exactly as #22's
+bounds-iteration cut was, not as a result.** The comment at the parameter
+says so, so nobody later reads 0.9 as load-bearing.
+
+**Thirteenth measurement lesson.** The flop model was right that the two step
+types cost the same arithmetic and right that NS is the better-shaped one. It
+was silent on the only thing that mattered — *how many iterations are
+available to reassign* — and that is a property of the convergence
+trajectory, not of the step cost. **A cost model over step types predicts
+nothing until it is weighted by the step DISTRIBUTION**, and the distribution
+here is set by quadratic convergence, which concentrates the iterations
+exactly where the choice does not exist.
