@@ -103,3 +103,22 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} tests passed")
+
+
+def test_sdc_leaf_default_is_one_split():
+    """The leaf default is max(2, n//2) -- one split, both halves to dgeev.
+    Recursing to 2x2 measured 4x slower with no accuracy gain (SSJ_LOG #25),
+    the same lesson the symmetric solver learned in #17. Pin the default and
+    the accuracy so a future 'deeper must be better' change has to face it."""
+    import numpy as np
+    from ssj.sdc import sdc_eigvals
+
+    r = np.random.default_rng(2)
+    A = r.standard_normal((200, 200)) / np.sqrt(200)
+    nrm = np.linalg.norm(A, 2)
+    wref = np.sort_complex(np.linalg.eigvals(A))
+    w = np.sort_complex(sdc_eigvals(A))
+    assert np.max(np.abs(w - wref)) / nrm < 1e-10
+    # the default must equal the explicit one-split configuration
+    w2 = np.sort_complex(sdc_eigvals(A, min_block=100))
+    assert np.max(np.abs(w - w2)) / nrm < 1e-12

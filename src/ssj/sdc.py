@@ -183,17 +183,28 @@ def _base_eigvals(A):
     return np.array([tr / 2.0 + root, tr / 2.0 - root])
 
 
-def sdc_eigvals(A, tol=1e-12, min_block=2, max_depth=64, count=None,
+def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
                 _depth=0, _rng=None):
     """Eigenvalues of a general real matrix by spectral divide and conquer.
 
     Globally convergent and free of any near-diagonal or normality
     requirement: every transformation applied is an orthogonal similarity.
 
+    min_block : recurse until blocks are this small; default max(2, n//2),
+        i.e. ONE split, both halves to dgeev. Recursing to 2x2 (the previous
+        default) measured 4x slower on Ginibre n=400 -- 21.1x dgeev against
+        5.3x -- and no more accurate. This is the same leaf lesson the
+        symmetric solver learned in SSJ_LOG #17: each level's split costs a
+        full-size sign iteration, while a dense solve of the block is
+        milliseconds, so deep recursion pays splits to avoid work that was
+        never expensive.
+
     `count` optionally accumulates {"gemm", "inv", "qr"} operation counts.
     """
     A = np.asarray(A, dtype=np.float64)
     n = A.shape[0]
+    if min_block is None:
+        min_block = max(2, n // 2)
     if _rng is None:
         _rng = np.random.default_rng(0)
     if count is not None and "_N" not in count:

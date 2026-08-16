@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #24)*
+*(rewritten each tick; as of attempt #25)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -86,6 +86,20 @@ not. The ladder loses its Newton-Schulz half (non-symmetric eigenvectors are
 not orthonormal) but the consult-A half works: 1e-8 -> 2.8e-16 in 4 IPT
 iterations. And the prize is ~7x larger: dgeev costs 131-181 gemm-equivalents
 here against dsyevd's 17-25.
+
+**The non-symmetric race, run (#25): parity in operations, 5.3x loss in
+wall.** SDC-by-sign against dgeev on Ginibre n=400: **88 gemm-equivalents
+counted against dgeev's 89 — parity** — but 407 ms against 76 ms measured.
+The architecture is not the problem; this implementation of it is, and the
+cost is localized: **one `matrix_sign` call is 6.3x the entire dgeev solve**,
+and sign + leaves are 90% of the run. Where inside `matrix_sign` remains
+unattributed (denormals refuted; my per-iteration decomposition was
+single-shot and cache-cold, so it was discarded rather than reported). So
+`sdc.py`'s founding claim — a method doing several times more arithmetic
+still wins if the arithmetic is gemms — is **true in the ledger and false at
+the wall**, pending that one function. The leaf lesson of #17 did transfer:
+one split (leaf = n/2) beats recursing to 2x2 by **4x** with equal accuracy,
+now the shipped default.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -274,6 +288,7 @@ the tail-exclusion path fires.
 | 22 | **Cut unnecessary steps**: all-fp32 pipeline, inertia rank, conditional polish, bounds trim | **minimality verdict — three cuts refuted with mechanisms, one at noise level. Every surviving step earns its place; CPU optimization is converged.** |
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
+| 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
 
 ### 1. SSJ-BC — verified
 
@@ -1610,3 +1625,60 @@ be ~1e-15. Both were caught by asking why a number contradicted theory rather
 than by the numbers looking bad. Eighth entry in the measurement-lessons
 family: a bare `except` around a numerical call converts a type error into a
 scientific claim.
+
+### 25. The non-symmetric race — the opening is real, the implementation is not
+
+#24 established the non-symmetric incumbent is ~7x weaker relative to gemm
+(dgeev 131–181 gemm-equivalents against dsyevd's 17–25) and that the sign
+function is the right splitter there. This tick ran the race.
+
+**The leaf lesson transferred, and is shipped.** `sdc_eigvals` defaulted to
+`min_block=2` — recursing to 2x2 blocks, the exact choice #17 identified as
+the symmetric solver's biggest single loss. Measured on Ginibre n=400:
+
+| leaf | wall | vs dgeev | eigenvalue error |
+|---|---|---|---|
+| 2 (old default) | 1610 ms | 21.1× | 1.6e-13 |
+| 32 | 1902 ms | 25.0× | — |
+| 100 | 1140 ms | 15.0× | — |
+| **n/2 (new default)** | **407 ms** | **5.3×** | **5.8e-14** |
+
+**4x faster and no less accurate** (on the planted real-spectrum case, 3.0e-13
+→ 4.6e-15). Each level pays a full-size sign iteration to avoid a dense solve
+that costs milliseconds — deep recursion buys splits nobody needed. Default
+changed to `max(2, n//2)`, pinned by a test; 168 tests pass.
+
+**And then the real finding, which is a contradiction.** Operation counts,
+load-immune, for the whole solve at n=400 (leaf=n/2):
+
+| | gemm | inv | qr | total gemm-equiv |
+|---|---|---|---|---|
+| SDC | 25 | 10 | 1 | **88** |
+| dgeev (measured) | — | — | — | **89** |
+
+**Parity in the ledger. 5.3x loss at the wall.** The kernel weights are not
+the problem — an inverse measured 5.02 gemm-equivalents against the model's
+5.35. The cost is localized instead: timed min-of-3 with warmup in one run,
+**a single `matrix_sign` call at n=400 costs 418 ms against dgeev's entire
+65.9 ms solve — 6.3x the incumbent for one split** — and sign plus the two
+leaves account for 90% of the 496 ms total.
+
+**Where inside `matrix_sign`, I could not establish this tick, and say so
+rather than guess.** A denormal-arithmetic hypothesis was specific and
+testable and is **refuted** (zero subnormal entries across all 15 iterations;
+|X| stays in [1e-7, 1.03]). My per-iteration decomposition attributed ~990
+gemm-equivalents to 9 inverses, which contradicts the 5.02 measured in
+isolation — but that harness timed each piece single-shot, cache-cold and
+un-warmed inside the loop, which is not a measurement, so it is discarded
+rather than reported. Ninth measurement lesson, and a new shape: *a
+decomposition whose parts contradict an isolated measurement of the same
+kernel is measuring the harness.*
+
+**Verdict.** `sdc.py`'s founding claim — that a method doing several times
+more arithmetic still wins when the arithmetic is gemms — is **true in the
+operation ledger and false at the wall**, and the entire discrepancy sits in
+one function. That makes the non-symmetric side the campaign's best-defined
+remaining target: not a search, a single profiling job on `matrix_sign` with
+the discipline the symmetric side already paid for (#21's component profile,
+#23's compiled port). If it recovers even half, SDC reaches parity with dgeev
+in wall as it already has in operations.
