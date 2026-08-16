@@ -78,3 +78,58 @@ if __name__ == "__main__":
         fn()
         print(f"ok  {fn.__name__}")
     print(f"\n{len(fns)} tests passed")
+
+
+def test_purify_eigh_goe():
+    """The full purification-bisection solver: the second pure-gemm family,
+    end to end. Eigenvalues at 1e-14; residual bar reflects the measured
+    ~1e-11 split-boundary mixing (documented in the docstring)."""
+    import numpy as np
+    from ssj import purify_eigh
+
+    r = np.random.default_rng(1)
+    M = r.standard_normal((400, 400))
+    A = (M + M.T) / np.sqrt(800)
+    w, V = purify_eigh(A)
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-10
+    assert np.linalg.norm(V.T @ V - np.eye(400)) < 1e-11
+
+
+def test_purify_eigh_hard_spectra():
+    """Exact 5-fold ties and a 1e-9 cluster: the leaves absorb what the
+    splits cannot separate."""
+    import numpy as np
+    from ssj import purify_eigh
+
+    r = np.random.default_rng(2)
+    Q, _ = np.linalg.qr(r.standard_normal((200, 200)))
+    vals = np.repeat(r.standard_normal(41), 5)[:200]
+    A = (Q * vals) @ Q.T
+    A = (A + A.T) / 2
+    w, V = purify_eigh(A)
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+
+    vals = np.sort(r.standard_normal(200))
+    vals[100:105] = vals[100] + 1e-9 * np.arange(5)
+    A = (Q * vals) @ Q.T
+    A = (A + A.T) / 2
+    w, V = purify_eigh(A)
+    nrm = np.linalg.norm(A, 2)
+    assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+    assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-10
+
+
+def test_purify_eigh_deterministic():
+    """Default rng is seeded: two calls must agree bit for bit."""
+    import numpy as np
+    from ssj import purify_eigh
+
+    r = np.random.default_rng(3)
+    M = r.standard_normal((150, 150))
+    A = (M + M.T) / np.sqrt(300)
+    w1, V1 = purify_eigh(A)
+    w2, V2 = purify_eigh(A)
+    assert np.array_equal(w1, w2) and np.array_equal(V1, V2)

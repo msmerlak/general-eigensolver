@@ -136,3 +136,64 @@ def purify_split(A, mu, tol=1e-12, count=None):
     resid = np.linalg.norm(B[r:, :r], "fro") / max(np.linalg.norm(A, "fro"),
                                                    1e-300)
     return B[:r, :r], B[r:, r:], r, resid
+
+
+def purify_eigh(A, leaf=None, tol=1e-12, rng=None):
+    """Full symmetric eigendecomposition by recursive purification bisection.
+
+    The OTHER pure-gemm family (SSJ_LOG #16-17): iterate on the MATRIX, not a
+    vector basis. Each level builds the spectral projector below mu = trace/n
+    by McWeeny purification (two gemms per iteration, quadratic, globally
+    convergent -- ~30 iterations regardless of size), extracts the split
+    basis with a randomized range-finder (P is idempotent to tol, so
+    QR([P G1, (I-P) G2]) splits exactly; one unpivoted QR, no dgeqp3), and
+    recurses. Leaves fall to LAPACK `eigh` -- the same reliance the SSJ block
+    schedule has on batched `eigh`.
+
+    Measured (SSJ_LOG #17, clean box): 8.3x LAPACK at n=400 and 9.9x at
+    n=800, against the composed SSJ solver's 12.0x / 16.0x -- the fastest
+    full solver in this repository on CPU, and structurally the most
+    GPU-shaped: every flop outside the leaves is a full-rate gemm.
+
+    Two measured boundaries (do not "fix" without re-measuring):
+    * precision="mixed" purification CANNOT work: the map never consults A
+      after the seed, so any projector is a fixed point and fp32 subspace
+      error is frozen forever (converges to ||P^2-P|| ~ 1e-14 with
+      ||[P,A]|| ~ 1e-5). SSJ is memoryless in A; purification is memoryless
+      in everything but P.
+    * Residuals run ~1e-11 rather than SSJ's ~1e-14: the split mixes the
+      subspaces of eigenvalues adjacent to each mu at the purification
+      tolerance, and eigenvalues (5.9e-15) forgive what residuals remember.
+
+    leaf : recurse until blocks are this small (default n//2 -- one
+        bisection, measured best at n <= 800; deeper recursion is for sizes
+        where `eigh` itself is the bottleneck, e.g. GPUs).
+    """
+    A = np.asarray(A)
+    n = A.shape[0]
+    if leaf is None:
+        leaf = max(64, n // 2)
+    if rng is None:
+        rng = np.random.default_rng(0x5D1)  # deterministic by default
+    if n <= leaf:
+        return np.linalg.eigh(A)
+    mu = float(np.trace(A).real) / n
+    P, _ = spectral_projector(A, mu, tol=tol)
+    r = int(np.rint(np.trace(P).real))
+    if r <= 0 or r >= n:  # spectrum did not split at the mean: fall back
+        return np.linalg.eigh(A)
+    G = rng.standard_normal((n, n))
+    Y = np.empty((n, n))
+    Y[:, :r] = P @ G[:, :r]
+    Y[:, r:] = G[:, r:] - P @ G[:, r:]
+    Q = np.linalg.qr(Y)[0]
+    B = Q.T @ (A @ Q)
+    B = (B + B.T) / 2.0
+    w1, V1 = purify_eigh(B[:r, :r], leaf, tol, rng)
+    w2, V2 = purify_eigh(B[r:, r:], leaf, tol, rng)
+    V = np.empty((n, n))
+    V[:, :r] = Q[:, :r] @ V1
+    V[:, r:] = Q[:, r:] @ V2
+    w = np.concatenate([w1, w2])
+    order = np.argsort(w, kind="stable")
+    return w[order], V[:, order]

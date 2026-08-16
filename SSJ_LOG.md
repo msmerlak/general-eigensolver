@@ -6,71 +6,43 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #16)*
+*(rewritten each tick; as of attempt #17)*
 
-**Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
-saturation. **Two phases**: spread-limited globalization (injectable — the
-schedule, #9; head blocks gated off once rel_off < 0.3, #14) and a
-manifold-free endgame past the cliff (IPT, #8). **The merge is irreducibly
-global** (#10). **Gains compose by Amdahl** (#11). **The algorithm stands at
-~2–3× LAPACK in flop units; the rest of the CPU wall gap is substrate**
-(#13).
+**The campaign's arc closed a loop.** Sixteen attempts of understanding-driven
+work on SSJ — divide-by-gap mechanics, the two-phase anatomy, the basin
+cliff, Amdahl composition, the substrate audit — and then one steered
+question ("is IPT the only pure-gemm iteration?") let all of it point at a
+DIFFERENT algorithm, which now holds the CPU crown: **recursive purification
+bisection, 8.3–9.9× LAPACK** against the composed SSJ's 12–16×. The
+understanding transferred; the incumbent did not.
 
-**The tracking niche died on CPU and moved to GPU (#14).** The claim "warm
-starts beat re-solving" was substrate-blind. Measured on a clean box across
-ε = 1e-8…1e-1 at n=800: warm never beats LAPACK — even one sweep from a
-perfect basis costs 2.6× a full `dsyevd` re-solve, because one SSJ sweep
-(~14.5 measured ge) already exceeds LAPACK's whole solve (~13.8 ge here).
-No warm start can win where a sweep costs more than the incumbent's full
-solve. The niche exists exactly where that inequality flips: substrates
-whose incumbent is expensive relative to a gemm (cuSOLVER at 30–40 ge).
-Every "where SSJ wins" claim is a claim about a substrate, not the
-algorithm.
+**Why purification wins here, in this log's own terms:** (1) its flops are
+all full-rate gemm — the #13 substrate audit says that is the only kernel
+this box runs at the flop floor; (2) its basin is GLOBAL (the scaled seed
+traps the spectrum in [0,1]) — it pays no globalization phase at all, which
+#9's anatomy showed is 80% of SSJ's cost; (3) its certificate is
+frame-independent (idempotency + trace), dodging #15's certificate trap; (4)
+its per-split iteration count is size-invariant (~30, quadratic).
 
-**Two warm-path fixes shipped anyway** (#14, unconditionally right): entry
-QR is now gated by a 1-ge Gram check (it re-orthonormalized an
-already-orthonormal previous eigenbasis at 12 ge — the largest single item
-in a warm solve), and the schedule's head blocks are gated on rel_off < 0.3
-(state-based, not X0-based: a bad X0 still fires them; a warm start or late
-sweep never pays an n/2 eigh for spread it has).
+**Its two boundaries are structural, not bugs:** mixed precision CANNOT work
+— the map never consults A after the seed, so any projector is a fixed
+point and fp32 subspace error freezes (converged ‖P²−P‖ 1e-14 with ‖[P,A]‖
+1e-5; #17). SSJ is memoryless in A and noise-tolerant; purification is
+memoryless in everything but P and noise-frozen. And residuals sit at
+~1e-11, not 1e-14: eigenvalues adjacent to each split point mix at the
+purification tolerance. Eigenvalues stay at 5.9e-15.
 
-**The retraction is also the certificate (#15).** Deferring
-orthonormalization — the era-stale "no gain" entry, re-measured at 8-sweep
-economics — is worse than useless: every skip rule costs sweeps (the skewed
-frame's angles are systematically poorer), and on GOE it converges the
-stopping criterion while the answer is wrong by 1e-7, because off(B) in a
-non-orthonormal frame is a congruence residual that certifies nothing. QR
-buys three things at once: the manifold, the saturation's geometry, and the
-meaning of the termination test.
+**Where SSJ still stands:** the map itself (global annihilation, both
+saturations) remains the only measured way to *rotate into* a basin —
+purification sidesteps basins instead of entering them. SSJ keeps warm-start
+tracking (GPU-only, #14) and the notebook carries both solvers' GPU
+questions: composed SSJ vs cuSOLVER, and now purification — whose every flop
+is gemm — as the third contender.
 
-**Method lessons now four of a kind:** untested defaults (#2), unasserted
-outputs (#5/#7), unexamined library identity (#13), and **cross-era number
-reuse** (#14: "expected 8 sweeps" came from the chained prototype, not the
-in-solver path — comparing across code eras manufactured a phantom
-regression).
-
-**IPT is not the only pure-gemm endgame — but its basin is invariant (#16).**
-Two families iterate to spectral objects in pure gemm: divide-by-gap fixed
-points on the *basis* (IPT, BW — linear, basin ρ<1, column-separable) and
-polynomial flows on the *matrix* (sign/purification — quadratic, basin
-GLOBAL, delivers splits, recursed to a full solve). A third relative
-(LU-normalized subspace iteration) trades the manifold for a triangle but
-converges at modulus ratios — useless here. And the tempting bridge —
-running IPT on p(B) to respace the spectrum — is closed by a small theorem:
-by Daleckii–Krein the divided difference that transports the coupling IS the
-factor by which the gap moves, so ρ(p(B)) = ρ(B) + O(W²) for every analytic
-p; verified to 1.000 numerically. The basin can't be bought by spectral
-surgery, joining ρ's diagonal-similarity invariance.
-
-**The purification recursion, measured end to end (#16):** 1.3× behind the
-composed SSJ on CPU (21.7× vs 16.5× LAPACK at n=800) at full accuracy — a
-remarkably strong second family, losing only to per-call overhead and
-pivoted-QR extraction (both fixable: randomized range-finder = 2 gemms), and
-structurally the most GPU-shaped solver in the repo.
-
-**Open:** (1) the GPU run — the notebook needs one small sync (the #14 warm
-fixes), and the purification recursion is now a candidate cell for it too;
-(2) a convergence proof — the only non-engineering item left.
+**Open:** (1) the GPU run — sync the notebook (warm fixes #14 +
+`purify_eigh` as a cell); (2) polish purification's residual (a one-step
+subspace refinement against A would consult A again — the exact cure its
+frozen map lacks); (3) the convergence proof for SSJ, still unclaimed.
 
 ## What SSJ is, and where the cost sits
 
@@ -238,6 +210,7 @@ the tail-exclusion path fires.
 | 14 | **Tracking**: warm-start crossover chart; schedule-head and entry-QR defects | **the CPU tracking niche is dead — warm never beats LAPACK here** (2.6× at best). Two warm-path fixes shipped; niche relocated to GPU, where the notebook tests it. |
 | 15 | **Re-measure the era-stale dead end**: deferred orthonormalization at 8-sweep economics | **dead end confirmed and upgraded** — it breaks the convergence certificate, not just the speed. The retraction is also the stopping test's meaning. |
 | 16 | **Is IPT the only pure-gemm endgame?** (user steer) — map the families; prove ρ(p(B)) invariance; measure the purification recursion end to end | **basin invariance proven + verified; purification loses 1.3× on CPU at full accuracy — the strong second family, GPU-shaped.** |
+| 17 | **Close purification's gap**: randomized extraction, leaf tuning, mixed purify | **NEW CPU CHAMPION — 8.3×/9.9× LAPACK** (vs composed SSJ 12×/16×), shipped as `purify_eigh` + tests. Mixed purify refuted with mechanism: the map freezes subspace error. |
 
 ### 1. SSJ-BC — verified
 
@@ -1181,3 +1154,47 @@ the certificate: trace and idempotency are frame-independent). On the GPU it
 is the natural competitor to both cuSOLVER and composed SSJ, and it is now a
 candidate cell for the notebook. No core code shipped this tick; prototype
 in scratchpad.
+
+### 17. Purification takes the CPU crown
+
+Attempt #16 left purification 1.3× behind with "identifiable fat". Three
+levers tested; two delivered, one refuted with a mechanism worth more than
+the speedup it denied.
+
+**Randomized extraction replaces the pivoted QR.** P is idempotent to tol,
+so `QR([P·G₁, (I−P)·G₂])` (one unpivoted QR + two gemms, ~11.2 measured ge)
+yields the exact split basis dgeqp3 was providing at 15.7–23.4 ge. Split
+residual 3.2e-14.
+
+**The leaf sweep: recursion depth was the overhead.** Levels below ~200 are
+call-bound while `eigh(200)` costs 4.6 ms. leaf = n/2 — one bisection, two
+LAPACK leaves — wins at both sizes. (This is the same LAPACK reliance the SSJ
+schedule has: its block passes are batched `eigh`. Fair race.)
+
+**Mixed purification is impossible, and the reason is structural.** The
+diagnostic: mixed converges to a *perfect* projector (‖P²−P‖ = 2.3e-14) that
+commutes with A only to 9.5e-6 — an exact projector onto the wrong subspace.
+The map P ← 3P²−2P³ never consults A after the seed; **every projector is a
+fixed point, so subspace error introduced at fp32 is frozen forever.**
+Contrast the reflection's standing fact about SSJ: memoryless in A, so any
+frame noise is re-measured away. Purification is memoryless in everything
+except P. A cure would have to consult A again (one subspace-iteration step
++ Rayleigh–Ritz polish) — noted as the residual-polish lever, not attempted.
+
+**The race — both runs clean (1.5% / 5.5% contamination), accuracy asserted:**
+
+| | n=400 | n=800 |
+|---|---|---|
+| purify leaf=n/2 | **153.7 ms = 8.3×** | **690.0 ms = 9.9×** |
+| purify leaf=200 | 153.7 ms | 813.7 ms |
+| composed SSJ (16-attempt champion) | 220.8 ms = 12.0× | 1116.6 ms = 16.0× |
+| LAPACK | 18.5 ms | 69.9 ms |
+
+**First single-digit ×LAPACK of the campaign, by 1.44×/1.62× over the
+incumbent.** Eigenvalues 5.9e-15; residuals ~3e-11 (split-boundary mixing,
+documented); degeneracy and 1e-9 clusters clean via the leaves.
+
+Shipped as `ssj.purify_eigh` (deterministic by default, LAPACK fallback when
+the spectrum refuses to split at the mean), 165 tests pass (3 new). The
+notebook sync — #14's warm fixes plus a `purify_eigh` cell — is now the last
+engineering item before the GPU run decides all three contenders at once.
