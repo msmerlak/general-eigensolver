@@ -190,7 +190,7 @@ def _inv_and_logdet(X):
         return np.linalg.inv(X), (logabsdet if sgn != 0 else np.inf)
 
 
-def _split(A, shift, tol=1e-12, count=None):
+def _split(A, shift, tol=1e-12, count=None, gate=1e-11):
     """One spectral split at Re(z) = shift.
 
     Returns (A11, A22, r) or None when the split is degenerate (everything on
@@ -242,7 +242,7 @@ def _base_eigvals(A):
 
 
 def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
-                _depth=0, _rng=None):
+                gate=1e-11, _depth=0, _rng=None):
     """Eigenvalues of a general real matrix by spectral divide and conquer.
 
     Globally convergent and free of any near-diagonal or normality
@@ -297,17 +297,26 @@ def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
             shift = centre + spread * float(_rng.standard_normal()) * 0.5 ** (
                 attempt // 4)
         try:
-            out = _split(A, shift, tol=tol, count=count)
+            out = _split(A, shift, tol=tol, count=count, gate=gate)
         except np.linalg.LinAlgError:
             continue
         if out is None:
             continue
         A11, A22, r, resid = out
-        if resid > 1e-6:
+        if resid > gate:
+            # The gate WAS 1e-6, which never fired: measured headroom against
+            # what the split actually achieves ran 25892x at n=1024 and 17
+            # million x at n=256 (SSJ_LOG #39). A genuinely bad split -- an
+            # eigenvalue 1.83e-04 from the splitting line, where the sign
+            # function is ill-conditioned -- sailed through at ||A21|| =
+            # 3.86e-11 while other shifts on the same matrix reached 1.6e-13.
+            # At 1e-11 it is rejected, two retries find a good shift, and the
+            # error improves 99x. The retry loop was always the right
+            # machinery; only the threshold was wrong.
             continue  # split too inaccurate to trust; try another shift
-        left = sdc_eigvals(A11, tol, min_block, max_depth, count,
+        left = sdc_eigvals(A11, tol, min_block, max_depth, count, gate,
                            _depth + 1, _rng)
-        right = sdc_eigvals(A22, tol, min_block, max_depth, count,
+        right = sdc_eigvals(A22, tol, min_block, max_depth, count, gate,
                             _depth + 1, _rng)
         return np.concatenate([left, right])
 

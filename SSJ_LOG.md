@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #38)*
+*(rewritten each tick; as of attempt #39)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 39 | **Instrument the split accuracy** (user request) | **cause found: an eigenvalue 1.83e-04 from the splitting line at n=1024.** Moving the shift fixes it 25–250×. The retry machinery already existed; the gate was **1e-6, with 25892× to 17-MILLION× headroom — it had never fired.** Shipped `gate=1e-11`: 99× better accuracy at n=1024, 2.5× sign cost there only, nothing changes at n≤512. |
 | 38 | **Device-leaf run** (user ran it) | prediction held in DIRECTION (loses at 1024), off 8–15% in magnitude. Best SDC: **1.39× / 1.15× / 0.79×** vs `cupy.linalg.eig`. **The win is confirmed CPU-bound** — at n=256 a 128×128 device eig costs 54.1 ms against a host round trip's 15.1. Crossover measured at 384–512 (`LEAF_DEVICE_MIN` 384→450). Accuracy loss localized to the SPLIT: all four leaf strategies give identical 4.2e-11. |
 | 37 | **Solve leaves on the device** (user request) | `leaf_solver` gains `device`/`auto`; SDC becomes a PRECONDITIONER for `cupy.linalg.eig`. Crossover measured between 256 and 512, and 3n/5 puts leaves right on it. **Prediction recorded: preconditioning loses narrowly at n=1024** (~868 vs 790 ms) because `eig` scales 3.07× not 8× from 512→1024. |
 | 36 | **The SDC GPU run** (user ran it) | **first win over a vendor eigensolver in the whole campaign: 1.13× cupy.linalg.eig at n=512** (1.08× at 256, 0.62× at 1024). Three predictions falsified: cupy HAS `eig`; `leaf=deep` is 4.4–16.4× SLOWER not faster; and my gemm-eq column was mixed-device. `scale=none` wins 1.1–2.1× and is now default. |
@@ -2702,3 +2703,84 @@ single split, not the leaves — consistent with #24's mechanism, the oblique
 projector norm ‖P‖ growing with n. That narrows the next tick to one place:
 instrument ‖P‖ and the split's ‖A21‖/‖A‖ against n, and check whether the
 1e-6 backward-error gate is simply too loose at scale.
+
+### 39. The split's accuracy, instrumented — an eigenvalue on the splitting line, and a gate five orders too loose
+
+**The instrument.** Split once, then solve BOTH diagonal blocks with dgeev.
+Any difference from dgeev on the whole matrix is the split's contribution and
+nothing else — no leaf error, no recursion.
+
+```
+   n   ||P||_2  rank  ||A21||/||A||  split dlam  full dlam  kappa max  A21*kmax
+ 128     18.92    64       6.63e-13    5.37e-13   5.37e-13    3.6e+01   2.41e-11
+ 256     12.42   127       5.83e-14    3.89e-14   3.89e-14    6.7e+01   3.90e-12
+ 512     19.88   255       5.51e-13    2.99e-13   2.99e-13    8.5e+01   4.70e-11
+1024     32.52   506       3.86e-11    1.04e-10   1.04e-10    2.0e+02   7.82e-09
+```
+
+**`split dlam` equals `full dlam` exactly at every size** — #38's inference
+from the four leaf strategies agreeing was right, and this makes it exact.
+`||A21||` jumps **70× from n=512 to n=1024**, so the split genuinely degrades;
+the forward error tracks it ~1:1 (0.8–2.7×), NOT `||A21||·kappa`, which
+over-predicts by 40–75×. Conditioning is not the driver.
+
+**First hypothesis, refuted.** The sign iteration stops on
+`||X²−I||_F/√n < tol`, an RMS measure, so the absolute defect it accepts grows
+like √n — the same shape as #31. Prediction: tighten tol by 1/√n. **Wrong.**
+The defect FLOORS at 2.7e-13 / 1.9e-12 / 4.3e-12 (n=256/512/1024) and tighter
+tolerances merely drive the iteration into `max_iter`, after which the split is
+rejected outright. The stopping rule is not the cause. It also cannot be the
+whole story numerically: `||A21||/defect` is 0.22 and 0.28 at n=256 and 512 but
+**8.0** at n=1024 — 30× out of line.
+
+**Second hypothesis, confirmed causally.** An eigenvalue sitting close to the
+splitting line, where the sign function is ill-conditioned. At n=1024,
+`min|Re λ − μ| = 1.83e-04`, the smallest of any size. Moving the shift on the
+SAME matrix:
+
+```
+   sigma-mu   min|Re-sig|  rank  ||A21||/||A||  split dlam  balance
+  3.500e-01      5.06e-03   292       9.71e-13    1.71e-12     0.29
+  9.999e-02      4.12e-03   450       7.33e-13    1.57e-12     0.44
+  0.000e+00      1.83e-04   506       3.86e-11    1.04e-10     0.49  <- centred
+```
+
+**25–250× better backward error, 60–250× better forward error, balance
+intact.** Same matrix, same n, same code — only the shift.
+
+**The fix needs no new machinery, and that is the embarrassing part.** The
+split ALREADY retries up to 12 shifts and ALREADY rejects on
+`||A21||/||A|| > gate`. The gate was **1e-6**, with measured headroom of
+25,892× at n=1024 and **17 million×** at n=256 against what the split actually
+achieves. It never fired. Sweeping it:
+
+```
+   n    gate   retries  sign steps  balance   split dlam
+1024   1e-06         0          17     0.49     1.04e-10
+1024   1e-10         0          17     0.49     1.04e-10
+1024   1e-11         2          43     0.30     1.05e-12   <- 99x better
+ 512   1e-11         0          15     0.50     2.99e-13   <- unchanged
+ 256   1e-11         0          15     0.50     3.89e-14   <- unchanged
+ 128   1e-11         0          10     0.50     5.37e-13   <- unchanged
+```
+
+**Shipped: `gate=1e-11`, exposed as a parameter in both `ssj.sdc` and the
+notebook.** The cost is honest and stated rather than buried: **2.5× the sign
+work at n=1024 only** (43 steps against 17), and since sign is ~2/3 of the
+runtime that is roughly 2× overall at that size. n ≤ 512 rejects nothing and
+pays nothing. Given SDC already loses to `cupy.linalg.eig` at n=1024 (0.79×),
+this trades a losing-but-fast configuration for a losing-and-slower one with
+100× better accuracy — defensible, because a fast answer that quietly sheds
+three digits as n grows is not the product.
+
+**Fifteenth measurement lesson.** A guard whose threshold is five orders
+looser than the quantity it guards is not a guard, it is a comment. The 1e-6
+gate had been in place since #24 and was described in three write-ups as the
+split's safety net; it had never once fired. **Any tolerance should be
+measured against what the code actually achieves, not against what would
+obviously be catastrophic** — otherwise it only catches the failures that were
+never going to be subtle.
+
+**Follow-up, named and not done:** `csrc/sdc_eig.c` carries the same 1e-6 gate.
+Changing it would invalidate #27/#28/#31's timing numbers, so it is flagged
+rather than changed blind — the C port needs its own accuracy instrument first.
