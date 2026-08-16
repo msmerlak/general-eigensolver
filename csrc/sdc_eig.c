@@ -210,11 +210,13 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     double *cur = X, *alt = ws->alt, *x2 = ws->x2;
 
     int it = 0;
+    int converged = 0;
     for (it = 1; it <= max_iter; it++) {
         scipy_dgemm_64_("N", "N", &n, &n, &n, &one, cur, &n, cur, &n, &zero,
                         x2, &n);
         double dev = dev_from_identity(x2, n) / sqn;
-        if (dev < tol) break;
+        if (st) st->last_dev = dev;
+        if (dev < tol) { converged = 1; break; }
 
         if (dev < ns_switch) {
             /* Newton-Schulz: 2 gemms, no factorization, quadratic.
@@ -247,7 +249,8 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     }
     if (it > max_iter) it = max_iter;
     if (cur != X) memcpy(X, cur, nn * sizeof(double));
-    return it;
+    if (!converged && st) st->n_fail_maxiter++;
+    return converged ? it : -2 - it;   /* negative encodes non-convergence */
 }
 
 /* --------------------------------------------------------------- one split */
@@ -267,7 +270,12 @@ static bi split_once(const double *A, bi n, double shift, double tol,
     double t0 = now_s();
     int its = matrix_sign_c(ws->cur, n, tol, 0.6, 60, ws, st);
     if (st) { st->t_sign += now_s() - t0; st->n_sign_calls++; }
-    if (its < 0) return -2;
+    if (its == -1) { if (st) { st->n_fail_singular++; } return -2; }
+    if (its < 0) {                       /* ran out of iterations */
+        if (st) st->iters_wasted += -(its + 2);
+        return -4;
+    }
+    if (st) st->last_sign_iters = its;
 
     /* P = (I + S)/2, in place. */
     for (size_t k = 0; k < nn; k++) ws->cur[k] *= 0.5;
@@ -275,7 +283,10 @@ static bi split_once(const double *A, bi n, double shift, double tol,
     for (bi i = 0; i < n; i++) { ws->cur[IDX(i, i, n)] += 0.5;
                                  tr += ws->cur[IDX(i, i, n)]; }
     bi r = (bi)llround(tr);
-    if (r <= 0 || r >= n) return -1;
+    if (r <= 0 || r >= n) {
+        if (st) { st->n_fail_rank++; st->iters_wasted += its; }
+        return -1;
+    }
 
     /* Orthonormal basis for range(P) by pivoted QR: the r independent columns
      * come first, so the leading r columns of Q span the invariant subspace.
@@ -307,7 +318,10 @@ static bi split_once(const double *A, bi n, double shift, double tol,
         for (bi i = r; i < n; i++) {
             double v = ws->b[IDX(i, j, n)]; s += v * v;
         }
-    if (sqrt(s) / (normA > 0 ? normA : 1.0) > 1e-6) return -3;
+    if (sqrt(s) / (normA > 0 ? normA : 1.0) > 1e-6) {
+        if (st) { st->n_fail_resid++; st->iters_wasted += its; }
+        return -3;
+    }
     return r;
 }
 

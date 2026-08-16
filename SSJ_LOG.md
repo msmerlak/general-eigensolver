@@ -1853,17 +1853,14 @@ two `QᵀAQ` gemms 2.6%. One *isolated* sign evaluation costs 0.79–1.04× the
 entire dgeev solve — down from 6.3× in Python, which is exactly the term that
 moved.
 
-**And the remaining gap has a name.** On Ginibre the solver takes **2 sign
-calls per solve where 1 is needed**: the first shift, `centre = tr(A)/n ≈ 0`,
-is rejected and a perturbed shift succeeds. The planted-real case needs only
-1. Since sign is ~2/3 of the run, the wasted retry is ~1/3 of the total —
-remove it and SDC lands at roughly parity with dgeev in wall, matching where
-it already sits in the operation ledger. *Why* the centred shift is rejected
-is not established here and is not claimed; Ginibre's spectrum is a disk
-about the origin, so a split at Re(z) = 0 puts eigenvalues arbitrarily close
-to the splitting line, but which guard fires (rank, singular iterate, or the
-1e-6 backward-error check) needs measuring, not reasoning. That is the next
-tick, and it is a one-counter job.
+**And the remaining gap has a name: 2 sign calls per solve where 1 would
+do.** Since sign is ~2/3 of the run, the second call is ~1/3 of the total.
+I guessed in this entry's first version that the centred shift `tr(A)/n` was
+being *rejected* and a perturbed shift retried. **That guess was wrong, and
+#28 measured it**: across 12 Ginibre configurations not one shift is ever
+rejected — zero rank failures, zero singular iterates, zero backward-error
+rejections, zero wasted iterations. The second call is a second *split*, and
+the cause is the leaf. See #28.
 
 **A test-matrix trap, caught by making the case validate itself.** My first
 `planted_real` used strictly-upper entries of magnitude 0.3, and SDC "failed"

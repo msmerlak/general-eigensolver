@@ -16,6 +16,16 @@ typedef struct {
     int n_ns;           /* Newton-Schulz steps taken (2 gemms, no inverse)  */
     int n_sign_calls;   /* sign evaluations, including failed shift retries */
     int n_fallbacks;    /* blocks that found no usable split                */
+    /* Why shift attempts were rejected, and what they cost. A failed attempt
+     * runs a FULL sign iteration before the guard fires, so these are the
+     * expensive counters, not diagnostics. */
+    int n_fail_rank;      /* trace(P) degenerate: everything on one side     */
+    int n_fail_singular;  /* singular iterate / LU failure                   */
+    int n_fail_resid;     /* ||A21||/||A|| over the 1e-6 backward-error bar  */
+    int n_fail_maxiter;   /* sign hit max_iter without reaching tol          */
+    int iters_wasted;     /* sign iterations spent inside REJECTED attempts  */
+    double last_dev;      /* ||X^2-I||_F/sqrt(n) at the last sign exit       */
+    int last_sign_iters;  /* iterations of the last SUCCESSFUL sign call     */
 } sdc_stats;
 
 /* Eigenvalues of a general real n x n matrix (column-major) by spectral
