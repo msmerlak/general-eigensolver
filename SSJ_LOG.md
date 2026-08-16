@@ -6,39 +6,44 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #13)*
+*(rewritten each tick; as of attempt #14)*
 
 **Fast eigensolvers divide by gaps**; the price is a basin (ρ < 1) or a
-saturation. **Two phases**: self-accelerating globalization (spread-limited,
-injectable — the schedule, #9) and a manifold-free endgame past the cliff
-(IPT, #8). **The merge is irreducibly global** (#10): work scales with
-coupling mass, not rotation mass. **Gains compose by Amdahl** (#11).
+saturation. **Two phases**: spread-limited globalization (injectable — the
+schedule, #9; head blocks gated off once rel_off < 0.3, #14) and a
+manifold-free endgame past the cliff (IPT, #8). **The merge is irreducibly
+global** (#10). **Gains compose by Amdahl** (#11). **The algorithm stands at
+~2–3× LAPACK in flop units; the rest of the CPU wall gap is substrate**
+(#13).
 
-**The floor claim of #11 was challenged and is now corrected (#13).** It
-conflated two gaps. In *flop units* the composed solver is ~30–40
-gemm-equivalents against LAPACK's 8–18 — **the algorithm stands within
-~2–3× of LAPACK**. The other ~6× of the wall ratio is *substrate*, now
-decomposed: numpy's gemm and Gram run AT the flop floor (overhead 1.0×);
-LAPACK QR pays 2.9–3.3× (panel serial fraction on 4 cores — LAPACK-internal,
-unreachable from Python); the B-form pays 1.9× (symmetrize + temporaries);
-the n² maps are memory-bound and already tight after #6. Symmetric BLAS
-(syrk/syr2k) does NOT reclaim it here — scipy's BLAS surface on this box is
-2.6× slower than numpy's `@` (measured control), so the only fast entry
-point has no symmetric kernels. **"Near the floor" means: of this algorithm,
-in this substrate.** On substrates where everything runs at gemm rate (GPU,
-MKL-class CPU), most of the 6× is reclaimable and CholeskyQR2's verdict
-plausibly flips — exactly what the notebook now measures.
+**The tracking niche died on CPU and moved to GPU (#14).** The claim "warm
+starts beat re-solving" was substrate-blind. Measured on a clean box across
+ε = 1e-8…1e-1 at n=800: warm never beats LAPACK — even one sweep from a
+perfect basis costs 2.6× a full `dsyevd` re-solve, because one SSJ sweep
+(~14.5 measured ge) already exceeds LAPACK's whole solve (~13.8 ge here).
+No warm start can win where a sweep costs more than the incumbent's full
+solve. The niche exists exactly where that inequality flips: substrates
+whose incumbent is expensive relative to a gemm (cuSOLVER at 30–40 ge).
+Every "where SSJ wins" claim is a claim about a substrate, not the
+algorithm.
 
-**Method lesson (#13, third instance of the same shape):** never compare
-kernels across library boundaries without a same-library control — scipy-vs-
-numpy BLAS identity was an unexamined assumption, like #2's untested
-defaults and #5/#7's unasserted outputs.
+**Two warm-path fixes shipped anyway** (#14, unconditionally right): entry
+QR is now gated by a 1-ge Gram check (it re-orthonormalized an
+already-orthonormal previous eigenbasis at 12 ge — the largest single item
+in a warm solve), and the schedule's head blocks are gated on rel_off < 0.3
+(state-based, not X0-based: a bad X0 still fires them; a warm start or late
+sweep never pays an n/2 eigh for spread it has).
 
-**Open, in value order:** (1) the GPU run — fully instrumented, waits on a
-card; (2) tracking — the composed solver's warm-start behaviour is
-unmeasured; (3) era-stale dead-ends — "deferred orthonormalization: no gain"
-was measured in the 25-sweep era; in the 8-sweep composed regime QR is ~50%
-of every sweep and the economics may invert; (4) a convergence proof.
+**Method lessons now four of a kind:** untested defaults (#2), unasserted
+outputs (#5/#7), unexamined library identity (#13), and **cross-era number
+reuse** (#14: "expected 8 sweeps" came from the chained prototype, not the
+in-solver path — comparing across code eras manufactured a phantom
+regression).
+
+**Open:** (1) the GPU run — now carrying schedule+hybrid+mixed AND the two
+warm fixes belong in the notebook next sync; tracking is the notebook's
+strongest card and now provably GPU-only; (2) era-stale: deferred
+orthonormalization at 8-sweep economics; (3) a convergence proof.
 
 ## What SSJ is, and where the cost sits
 
@@ -203,6 +208,7 @@ the tail-exclusion path fires.
 | 11 | **The full composition: mixed × schedule × hybrid**, plus the fp64-phase block policy it needed | **champion config, 2.33× over plain (16–18× LAPACK) — and gains compose by Amdahl, not multiplication.** |
 | 12 | **Bring the GPU notebook up to the composed solver** (schedule, predictive NS, IPT hybrid, mixed segments) | **shipped and validated** — 50 config × spectrum rows pass on the NumPy path; hybrid runs GOE n=200 in 4 sweeps + 8 gemms. |
 | 13 | **Audit the floor claim**: decompose measured-vs-modelled per component; test symmetric BLAS (syrk/syr2k, BLAS-level CholeskyQR2) | **floor claim corrected — algorithm is ~2–3× LAPACK in flop units; substrate ~6×, not reclaimable from Python on this stack.** scipy/numpy BLAS mismatch caught by control. |
+| 14 | **Tracking**: warm-start crossover chart; schedule-head and entry-QR defects | **the CPU tracking niche is dead — warm never beats LAPACK here** (2.6× at best). Two warm-path fixes shipped; niche relocated to GPU, where the notebook tests it. |
 
 ### 1. SSJ-BC — verified
 
@@ -987,3 +993,57 @@ contaminating a comparison.
 No solver code changed; scratchpad only. The headline correction — the
 campaign's honest standing is *2–3× LAPACK in flop units*, with the rest
 substrate — is now in the reflection where it can steer.
+
+### 14. Tracking — the niche dies on CPU, and two warm-path defects die with it
+
+Queued since #11. Three results: two shipped fixes, one standing claim killed.
+
+**Defect 1 — the schedule fired its head on warm starts.** The schedule
+indexes by sweep count, so a tight `X0` paid an n/2 + n/4 batched eigh per
+early sweep for spread it already had: same sweep counts, 1.19× wall (same
+defect shape as #11's mixed-phase fix). At ε=1e-2 the head did save one sweep
+(4 vs 5) — but the eigh it costs per sweep exceeds the sweep it saves, so
+skipping is right even there. **Fix: state-based, not X0-based** — the
+schedule jumps to its tail entry whenever rel_off < 0.3 (`_SCHED_HEAD_GATE`),
+using a quantity the loop already computes. A junk X0 still fires the head;
+cold solves are bit-identical with and without the gate (verified: histories
+equal at gate 0.3 vs 0.0).
+
+**Defect 2 — the entry QR re-orthonormalized an orthonormal basis.**
+`_orth_qr(X0)` ran unconditionally: 12 gemm-equivalents (47 ms at n=800), the
+single largest item in a warm solve, spent un-rotating a previous eigenbasis
+that is orthonormal to 1e-14. Now a 1-ge Gram check decides; any defect below
+the threshold is corrected at the first retraction anyway (the product form
+re-measures X's defect — the module's own load-bearing property). The mixed
+path is unaffected: its fp32→fp64 hand-off has a ~1e-7 defect and still fires
+the QR, as it must.
+
+**The crossover chart — clean box, 1.7% contamination, accuracy asserted:**
+
+| ε (n=800) | warm ms | sweeps | LAPACK ms | warm/LAPACK |
+|---|---|---|---|---|
+| 1e-8 | 126.5* | 1 | 48.3 | **2.6×** |
+| 1e-4 | 291.2* | 3 | 48.9 | **6.0×** |
+| 1e-2 | 486.3 | 5 | 48.0 | 10.1× |
+| 1e-1 | 502.2 | 5 | 47.9 | 10.5× |
+
+(*after both fixes; pre-fix 1e-8 was 161.9.) **Warm never beats LAPACK at any
+ε.** The mechanism is arithmetic, not implementation: one SSJ sweep measures
+~14.5 gemm-equivalents while LAPACK's entire `dsyevd` is ~13.8 on this box —
+when a single sweep costs more than the incumbent's full solve, no warm start
+can win, however perfect the basis. The long-standing "warm start: 1–5 sweeps
+beats re-solving" claim compared SSJ-warm against SSJ-cold and never against
+the incumbent. **The tracking niche is a property of the substrate**: it
+exists exactly where the incumbent is expensive relative to a gemm — cuSOLVER
+at 30–40 gemm-equivalents — which the GPU notebook's warm-tracking cell now
+decides. (The two warm fixes belong in the notebook at its next sync.)
+
+**Also caught: a phantom regression from cross-era numbers.** The head-gate
+check "expected 8 sweeps at n=800, got 9" — the 8 was from #9's *chained*
+prototype (which re-orthonormalizes between one-sweep calls), never the
+in-solver path. Gate on/off A-B showed bit-identical behaviour. Fourth
+instance of the measurement-lesson family: never compare against a number
+from a different code era without re-measuring it.
+
+162 tests pass (2 new: entry-QR guard accuracy both branches; head-gate
+bit-equivalence with tail-only on warm starts).

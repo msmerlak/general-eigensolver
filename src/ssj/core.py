@@ -220,6 +220,14 @@ def _power_iter_norm_antisym(K, v0=None, iters: int = 25):
 
 
 _BLOCK_NS_FLOOR = 0.1  # Newton-Schulz target floor, as a fraction of tol
+# A block schedule's big HEAD entries exist to build diagonal spread, and
+# spread is built exactly when the off-diagonal stops dominating. Below this
+# rel_off, the schedule jumps to its tail entry: a warm start (or a late
+# sweep) never pays an n/2 batched eigh for spread it already has. Measured:
+# on a warm start the head blocks change no sweep counts and cost 1.19x wall;
+# even at eps=1e-2, where they do save one sweep, the eigh they cost per
+# sweep exceeds the sweep they save.
+_SCHED_HEAD_GATE = 0.3
 # How much margin to leave when predicting convergence, as a multiple of tol.
 # Measured across 1e6/1e9/1e12 on cold GOE and on warm starts: 1e9 is fastest
 # on both counts. Too thin (1e6) and a warm start beginning at rel_off ~3e-6
@@ -510,7 +518,17 @@ def ssj_eigh(
         X0 = xp.asarray(X0)
         if X0.shape != (n, n):
             raise ValueError("X0 must match the shape of A")
-        X = _orth_qr(X0.astype(A.dtype, copy=False))
+        X = X0.astype(A.dtype, copy=False)
+        # A warm start's X0 is usually a previous eigenbasis -- already
+        # orthonormal to roundoff -- and the unconditional QR here measured
+        # 12 gemm-equivalents (47 ms at n=800), the single largest item in a
+        # warm solve. One Gram (1 ge) decides. The threshold is generous:
+        # any defect below it is corrected at the first retraction anyway,
+        # because the product form re-measures X's defect inside Y^H Y.
+        G = X.conj().T @ X
+        if float(xp.linalg.norm(G - xp.eye(n, dtype=A.dtype),
+                                ord="fro")) > 1e-12 * np.sqrt(n):
+            X = _orth_qr(X)
     eye = xp.eye(n, dtype=A.dtype)
     history: list[float] = []
     gemms = 0
@@ -529,7 +547,10 @@ def ssj_eigh(
             break
 
         if block_sched is not None:
-            block_m = block_sched[min(sweeps, len(block_sched) - 1)]
+            k = min(sweeps, len(block_sched) - 1)
+            if rel_off < _SCHED_HEAD_GATE:
+                k = len(block_sched) - 1     # spread built: tail blocks only
+            block_m = block_sched[k]
         if block_m and rel_off > block_until:
             for r in range(block_passes):
                 B, X = _block_pass(

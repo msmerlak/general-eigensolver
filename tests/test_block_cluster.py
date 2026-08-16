@@ -294,3 +294,39 @@ def test_mixed_schedule_full_phase_resolves_fp32_invisible_cluster():
     assert info["converged"]
     assert info["sweeps"] <= 3          # fp64 phase alone
     assert_accurate(A, w, V, tol=1e-11)
+
+
+def test_warm_start_skips_entry_qr_but_stays_accurate():
+    """An orthonormal X0 must not be re-orthonormalized (12 gemm-equivalents
+    of pure waste, measured), and a deliberately skewed X0 must still be."""
+    A = goe(200, seed=1)
+    _, V0 = np.linalg.eigh(A)
+    r = np.random.default_rng(9)
+    P = r.standard_normal((200, 200))
+    P = (P + P.T) / 2
+    A2 = A + 1e-5 * P / np.linalg.norm(P, 2)
+    # orthonormal X0: guard skips the QR; result must be full accuracy
+    w, V, info = ssj_eigh(A2, X0=V0, block_m=[100, 50, 32], return_info=True)
+    assert info["converged"]
+    assert_accurate(A2, w, V)
+    # skewed X0: guard must fire the QR and still converge accurately
+    X0_bad = V0 + 0.05 * r.standard_normal((200, 200))
+    w, V, info = ssj_eigh(A2, X0=X0_bad, return_info=True)
+    assert info["converged"]
+    assert_accurate(A2, w, V)
+
+
+def test_schedule_head_gated_on_warm_start():
+    """With a tight X0 the schedule must not fire its big head blocks --
+    the gated path is bit-identical to running the tail entry alone."""
+    A = goe(200, seed=1)
+    _, V0 = np.linalg.eigh(A)
+    r = np.random.default_rng(9)
+    P = r.standard_normal((200, 200))
+    P = (P + P.T) / 2
+    A2 = A + 1e-5 * P / np.linalg.norm(P, 2)
+    w1, V1, i1 = ssj_eigh(A2, X0=V0, block_m=[100, 50, 32], return_info=True)
+    w2, V2, i2 = ssj_eigh(A2, X0=V0, block_m=32, return_info=True)
+    assert i1["sweeps"] == i2["sweeps"]
+    assert np.array_equal(w1, w2)
+    assert np.array_equal(V1, V2)
