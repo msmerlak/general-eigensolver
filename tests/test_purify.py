@@ -160,3 +160,48 @@ def test_purify_eigh_mixed_precision():
     nrm = np.linalg.norm(A, 2)
     assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
     assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 1e-8
+
+
+def test_refine_eigh_upgrades_fp32_basis():
+    """The refinement ladder as a public API: from an fp32 LAPACK basis
+    (~3e-8), two pairs must reach ~1e-13 on easy and hard spectra alike."""
+    import numpy as np
+    from ssj import refine_eigh
+
+    r = np.random.default_rng(1)
+    for A in [
+        (lambda M: (M + M.T) / np.sqrt(800))(r.standard_normal((400, 400))),
+        (lambda Q, v: ((Q * v) @ Q.T + ((Q * v) @ Q.T).T) / 2)(
+            np.linalg.qr(r.standard_normal((200, 200)))[0],
+            np.repeat(r.standard_normal(41), 5)[:200]),
+    ]:
+        n = A.shape[0]
+        w32, V32 = np.linalg.eigh(A.astype(np.float32))
+        w, V = refine_eigh(A, w32, V32, pairs=2)
+        nrm = np.linalg.norm(A, 2)
+        assert np.max(np.abs(np.sort(w) - np.linalg.eigvalsh(A))) / nrm < 1e-12
+        assert np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm < 5e-12
+        assert np.linalg.norm(V.T @ V - np.eye(n)) < 1e-12
+
+
+def test_refine_eigh_documented_basin_boundary():
+    """Outside the basin (~1e-2 corruption) the ladder stalls rather than
+    converging -- the documented boundary, pinned so a future 'global
+    refiner' claim has to face it."""
+    import numpy as np
+    from scipy.linalg import expm
+    from ssj import refine_eigh
+
+    r = np.random.default_rng(5)
+    M = r.standard_normal((200, 200))
+    A = (M + M.T) / np.sqrt(400)
+    wt, Vt = np.linalg.eigh(A)
+    S = r.standard_normal((200, 200))
+    S = (S - S.T) / 2
+    S /= np.linalg.norm(S, 2)
+    V0 = Vt @ expm(3e-2 * S)
+    w0 = np.diag(V0.T @ (A @ V0)).copy()
+    w, V = refine_eigh(A, w0, V0, pairs=6)
+    nrm = np.linalg.norm(A, 2)
+    res = np.max(np.linalg.norm(A @ V - V * w, axis=0)) / nrm
+    assert res > 1e-8   # it must NOT silently claim convergence from here

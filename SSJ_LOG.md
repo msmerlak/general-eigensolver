@@ -6,63 +6,40 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #19)*
+*(rewritten each tick; as of attempt #20)*
 
-**The campaign's arc closed a loop.** Sixteen attempts of understanding-driven
-work on SSJ — divide-by-gap mechanics, the two-phase anatomy, the basin
-cliff, Amdahl composition, the substrate audit — and then one steered
-question ("is IPT the only pure-gemm iteration?") let all of it point at a
-DIFFERENT algorithm, which now holds the CPU crown: **recursive purification
-bisection, 8.3–9.9× LAPACK** against the composed SSJ's 12–16×. The
-understanding transferred; the incumbent did not.
+**The canonical structure, arrived at and then validated by refutation
+(#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
+The ladder (consult-A IPT step ⟂ Newton–Schulz step, alternating — skip
+either and you floor, #19) squares the error per ~5-gemm pair. Its basin was
+*measured, and it is small*: convergence from coarse error ≲ 1e-3..1e-4,
+proportional stall beyond (0.2× the corruption from 1e-2). So refinement
+buys the last 7–11 digits and never the first four. The first four are the
+actual eigenvalue problem — and they are precision-free, which is where all
+the substrate leverage lives.
 
-**Why purification wins here, in this log's own terms:** (1) its flops are
-all full-rate gemm — the #13 substrate audit says that is the only kernel
-this box runs at the flop floor; (2) its basin is GLOBAL (the scaled seed
-traps the spectrum in [0,1]) — it pays no globalization phase at all, which
-#9's anatomy showed is 80% of SSJ's cost; (3) its certificate is
-frame-independent (idempotency + trace), dodging #15's certificate trap; (4)
-its per-split iteration count is size-invariant (~30, quadratic).
+**Everything measured this campaign slots into that frame.** SSJ = a coarse
+supplier with a global-rotation mechanism (its own endgame was already the
+ladder's ancestor). Purification = a coarse supplier with a global basin and
+pure-gemm flops (fp32-split champion #19 IS coarse+ladder). LAPACK dsyevd =
+a coarse supplier that happens to go all the way. Tracking = a coarse
+supplier from history. `refine_eigh` now ships the ladder as a public API:
+upgrade ANY ≳1e-4 basis — a GPU fp16/fp32 eigensolve, a tracked basis,
+either family's split — to fp64 at ~5 gemms per squared digit, no
+factorization.
 
-**Its two boundaries are structural, not bugs:** mixed precision CANNOT work
-— the map never consults A after the seed, so any projector is a fixed
-point and fp32 subspace error freezes (converged ‖P²−P‖ 1e-14 with ‖[P,A]‖
-1e-5; #17). SSJ is memoryless in A and noise-tolerant; purification is
-memoryless in everything but P and noise-frozen. And residuals sit at
-~1e-11, not 1e-14: eigenvalues adjacent to each split point mix at the
-purification tolerance. Eigenvalues stay at 5.9e-15.
+**Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
+this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
+natural headline on tensor-core substrates). The campaign's portable output
+is mechanisms and structure; every ×-number is a claim about one substrate.
 
-**Where SSJ still stands:** the map itself (global annihilation, both
-saturations) remains the only measured way to *rotate into* a basin —
-purification sidesteps basins instead of entering them. SSJ keeps warm-start
-tracking (GPU-only, #14) and the notebook carries both solvers' GPU
-questions: composed SSJ vs cuSOLVER, and now purification — whose every flop
-is gemm — as the third contender.
-
-**The two families compose (#18).** IPT's one weakness is needing a basin;
-purification's one weakness is never consulting A. Each is the other's cure:
-purification hands IPT a basis with ρ ≈ 0, and one IPT step (3 gemms) hands
-purification back the residual its frozen map cannot reach — 1e-13 → 3e-15
-on every spectrum. SP2's trace-branched squaring then cuts the split's
-substrate cost (one gemm + a trace per iteration, 1.3–1.4× on wall at equal
-gemm counts), with a free split-verification fallback covering its one
-fragility (ties exactly at μ sit at the purification fixed point ½).
-**Champion: `precision="mixed"` at 4.9–6.7× LAPACK (GOE resid ≤6e-14; tight-cluster residuals floor at ~1e-10, documented); `"full"` at 6.0–8.5× with resid 3e-15 everywhere.**
-
-**Precision refinement is a ladder, and every rung is a measured mechanism
-(#19).** fp32 purification alone freezes subspace error (#17). Adding a
-consult-A polish unfreezes it — but stalls at err² ≈ 1e-8, because the
-polish is a first-order NON-orthogonal correction whose rotation leaves an
-O(err²) orthogonality defect, and the next step inherits it as congruence
-error (#15's lesson resurfacing at a smaller scale). One Newton–Schulz step
-between polishes (2 gemms; 1e-8 defect → 1e-16) restores exact
-error-squaring: 2e-4 → 3e-8 → 2e-12 → 2e-15 measured per step. The general
-principle: **iterative refinement for the eigenproblem = consult-A step +
-re-orthonormalization, alternating; skip either and you floor.**
-
-**Open:** (1) the GPU run — sync the notebook (warm fixes #14 + a
-`purify_eigh` cell; on tensor cores the fp32-split route is the natural
-headliner); (2) the convergence proof for SSJ, still unclaimed.
+**Where this leaves the competition on this CPU:** dsyevd is its own coarse
+supplier at 1×, so nothing beats it locally except by supplying coarse more
+cheaply than LAPACK — purification-mixed at 4.9–6.7× is the best
+LAPACK-free answer. The open decisive question is unchanged and now sharper:
+**on substrates where low-precision is genuinely cheap (GPU), coarse+ladder
+is the design, and the notebook should race it** — fp16/fp32 cuSOLVER or
+fp32-SP2 as coarse, ladder to fp64. Then the SSJ convergence proof.
 
 ## What SSJ is, and where the cost sits
 
@@ -233,6 +210,7 @@ the tail-exclusion path fires.
 | 17 | **Close purification's gap**: randomized extraction, leaf tuning, mixed purify | **NEW CPU CHAMPION — 8.3×/9.9× LAPACK** (vs composed SSJ 12×/16×), shipped as `purify_eigh` + tests. Mixed purify refuted with mechanism: the map freezes subspace error. |
 | 18 | **Compose the families**: one IPT step polishes the purified basis; SP2 replaces McWeeny; split-verification fallback | **champion at full accuracy: 6.0–9.3× LAPACK, resid 3e-15.** Suite caught SP2×degeneracy; safety net free on the happy path. |
 | 19 | **fp32 splits + the refinement ladder** (consult-A polish ⟂ NS re-orth, alternating) | **champion again: 4.9×/6.7× LAPACK shipped as `precision="mixed"`.** The polish alone floors at err² — the interleaved NS step restores quadratic refinement. |
+| 20 | **Rethink the structure**: is the ladder the whole algorithm? Measure its basin; test fp32-LAPACK coarse | **structure settled: coarse (≲1e-4, precision-free) + ladder (last digits). Basin is SMALL (stalls from 1e-2), ssyevd = dsyevd here (ambush #6). `refine_eigh` shipped as the reusable half.** |
 
 ### 1. SSJ-BC — verified
 
@@ -1315,3 +1293,46 @@ boundary. 166 tests pass.
 Campaign standing on the cold CPU solve: 28–42× (start) → 16–18× (SSJ line)
 → 6–9× (#17–18) → **4.9–6.7×** — inside 5× of LAPACK at n=400, from a
 pure-gemm method with a global basin.
+
+### 20. The structural rethink — coarse plus ladder, with a measured boundary
+
+Steered: rethink the algorithm structure in depth. The audit: the champion
+spends ~55 gemms per single bit of spectral partition; the deep justification
+is that matrix-matrix iteration reaches polynomial degree 3^k in 2k gemms —
+exponentially more filter per gemm than any thin/Krylov evaluation, which is
+*why* iterating on the matrix beats applying filters to blocks. Against that,
+#19's ladder squares error per ~5-gemm pair. Hypothesis: if the ladder's
+basin were ~mean-gap/‖A‖ ~ 1/n, the coarse stage could be nearly free and
+the ladder would BE the algorithm.
+
+**E1 refuted the hypothesis and produced the boundary.** Corrupting an exact
+eigenbasis by an exact rotation of scale ε: the ladder converges from
+fp32-quality error and stalls proportionally (≈0.2·ε after six pairs) from
+ε = 1e-2, at every n tested — no 1/n scaling. **The ladder buys the last
+7–11 digits, never the first four.** The first four digits are the actual
+eigenvalue problem; they are also precision-free, which is where substrate
+leverage lives.
+
+**E2, substrate ambush #6: ssyevd runs at dsyevd speed on this box**
+(17.2 vs 17.3 ms at n=400; 72.6 vs 69.8 at n=800). The natural "fp32 LAPACK
+as coarse" instantiation is pointless HERE — and is the obvious headline on
+any substrate where low precision is actually cheap (tensor-core GPUs).
+
+**E3, the refiner validated across the battery** (from fp32 bases at ~3e-8):
+two pairs land 1.7e-14 (GOE 400), 1.4e-13 (GOE 800), 6.2e-12 (5-fold ties),
+1.0e-14 (zero diagonal); the known 1e-10 intra-cluster floor persists. As a
+standalone CPU solver, fp32-LAPACK + ladder = 2.2× dsyevd — pointless when
+dsyevd is present, decisive when only a low-precision solver is (the GPU
+case, the tracking case).
+
+**Shipped: `ssj.refine_eigh(A, w, V, pairs=2)`** — the ladder as a public
+API that upgrades ANY ≳1e-4-accurate basis to fp64 at ~5 gemms per squared
+digit, with the basin boundary documented and *pinned by a test that
+requires the ladder to fail* from 3e-2 corruption (a future "global refiner"
+claim must face it). 168 tests pass.
+
+**The settled architecture, stated once:** eigensolving here = a coarse
+supplier (SSJ, purification, LAPACK, a tracked basis — interchangeable,
+precision-free, must deliver ≲1e-3..1e-4) composed with the refinement
+ladder. #19's champion was already its instantiation; this tick named it,
+measured its load-bearing boundary, and shipped its reusable half.

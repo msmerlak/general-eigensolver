@@ -195,6 +195,37 @@ def _ipt_polish(A, w, V):
     return d[order], V2[:, order]
 
 
+def refine_eigh(A, w, V, pairs=2):
+    """Upgrade ANY approximate eigenbasis of Hermitian A to fp64 accuracy.
+
+    The refinement ladder (SSJ_LOG #19-20): alternate one consult-A IPT step
+    (3 gemms -- fixes the residual, first-order and non-orthogonal) with one
+    Newton-Schulz step (2 gemms -- clears the O(err^2) orthogonality defect
+    the polish leaves, which would otherwise floor the next step). Each pair
+    roughly squares the error: from an fp32-quality basis (~3e-8), two pairs
+    land 1e-13..1e-14 across GOE, exact ties, tight clusters and zero
+    diagonals.
+
+    MEASURED BASIN (do not feed this garbage): the ladder converges from
+    coarse error up to ~1e-3..1e-4 and stalls proportionally beyond (from
+    1e-2 corruption it plateaus near 0.2x the corruption). It buys the last
+    7-11 digits, never the first four -- those must come from a real solver:
+    fp32 LAPACK, either pure-gemm family here, or a tracked previous basis.
+
+    Use cases: refining a low-precision (GPU fp16/fp32) eigensolve to fp64;
+    finishing a warm-started tracking step; polishing either family's split.
+    ~5 gemms per squared digit, no factorization anywhere.
+    """
+    w = np.asarray(w, dtype=np.float64)
+    V = np.asarray(V, dtype=np.float64)
+    n = A.shape[0]
+    for _ in range(pairs):
+        w, V = _ipt_polish(A, w, V)
+        G = V.T @ V
+        V = V @ (1.5 * np.eye(n) - 0.5 * G)
+    return w, V
+
+
 def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
                 precision="full"):
     """Full symmetric eigendecomposition by recursive purification bisection.
