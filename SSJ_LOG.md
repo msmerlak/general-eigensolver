@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #27)*
+*(rewritten each tick; as of attempt #28)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -140,10 +140,14 @@ more a method leans on kernels NumPy cannot express (here `dgetri`, and
 fused passes over n² that NumPy pays as separate temporaries **every**
 iteration), the larger the compiled gain. Phase attribution, now stable
 across three sizes: sign 66–71%, leaves 15–19%, pivoted QR 13–14%, gemms
-2.6%. **The named remainder: two sign evaluations per solve where one is
-needed** — the centred shift `tr(A)/n` is rejected on Ginibre and a
-perturbed one succeeds — worth ~1/3 of the run, which is most of what still
-separates SDC from parity.
+2.6%. **The named remainder, now fixed (#28): two sign evaluations per solve
+where one was needed** — not a rejected shift, as #27 guessed, but a leaf of
+exactly n/2 sitting just under `r = trace(P)`. Leaf 3n/5 takes the C solver
+to **0.60×/0.67×/0.65× dgeev** and the Python one from 412 to 207 ms at
+n=200. What remains is the sign function itself: one evaluation costs
+0.77–1.02× an entire dgeev solve, and the flop model says the opening is the
+Newton/Newton–Schulz switch, since both steps cost 4n³ but only NS is pure
+gemm.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -333,6 +337,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 28 | **Improve the C SDC** — instrument the shift guards, then the leaf | **the #27 diagnosis was a guess and was wrong: ZERO shifts are ever rejected.** The second sign call is a second split, caused by leaf = n/2 landing just under r = trace(P). Leaf 3n/5: **0.60×/0.67×/0.65× dgeev** (C), 412→207 / 1315→748 ms (Python). |
 | 27 | **SDC in a compiled language** (user request) — `csrc/sdc_eig.c`, same OpenBLAS | **0.56×/0.61×/0.61× dgeev at n=200/400/800, from Python's 0.07×/0.13× — a 5–8× implementation gain.** #25's ledger was right; NumPy was the whole gap. Sign is 66–71%, and one wasted shift retry is ~1/3 of the run. |
 | 26 | **Can IPT run on the separated eigenvalues while another algorithm takes the rest?** (user question) — column split, shipped as `ipt_hybrid_eigh` | **yes, and exactly: 1.3e-15–8.6e-15 where plain IPT fails at 7e-07–1e-04.** Speed is parity (0.97–1.08×) — the split buys ADMISSION, not throughput. Screen is a SAFETY property: unscreened, two columns converge to the *same* eigenpair. `ipt_rate_columns` vectorized, bit-identical, 2.4–4.6×. |
 
@@ -1880,3 +1885,82 @@ compared by nearest-match, never by sorting. A real matrix has exact
 conjugate pairs whose real parts tie, so a lexicographic sort reports errors
 of order 2|Im λ| that do not exist — that bug cost a full re-measurement
 earlier in this session and is now commented at the comparison site.
+
+### 28. The leaf was off by three — and my #27 diagnosis was a guess
+
+**Two findings, and the first one is about method.** #27 closed by naming the
+remaining gap: 2 sign calls per solve where 1 would do, worth ~1/3 of the run.
+It also *explained* that gap — the centred shift `tr(A)/n` is rejected and a
+perturbed shift retried — and the explanation was a guess, reasoned from the
+fact that Ginibre's spectrum is a disk about the origin so a split at
+Re(z) = 0 puts eigenvalues near the splitting line. It reads like a finding.
+It was wrong.
+
+Counters on every guard (degenerate rank, singular iterate, backward-error
+rejection, iteration limit) plus the iterations burned inside rejected
+attempts, across 12 Ginibre configurations at n = 200/400/800:
+
+```
+   n   seed  sign calls  rank  singular  resid  maxiter  wasted iters
+ 200    1-4      2         0       0       0       0          0
+ 400    1-4      2         0       0       0       0          0
+ 800    1-4      2         0       0       0       0          0
+```
+
+**Not one shift is ever rejected.** The second sign call is a second *split*.
+
+**The actual cause: the leaf.** The default was `max(2, n//2)`, chosen in #25
+to mean "one split, both halves to dgeev". It does not mean that. The split
+returns `r = trace(P)`, which lands NEAR n/2 but essentially never ON it, so
+one half comes back a few rows too big, fails the leaf test, and buys a whole
+second full-size sign iteration to shave a dgeev that was already cheap.
+
+**The fix and its measurement.** Leaf sweep on Ginibre, accuracy asserted
+before timing — 2 sign calls at 0.50n, 1 at every fraction from 0.55n to
+0.90n:
+
+```
+   n    leaf 0.50n      leaf 0.60n     dgeev     ratio
+ 200      28.9 ms         27.5 ms     15.2 ms   0.53x -> 0.55x
+ 400     110.4 ms         94.8 ms     64.0 ms   0.58x -> 0.68x
+ 800     581.0 ms        522.8 ms    339.6 ms   0.58x -> 0.65x
+```
+
+Confirmed end to end at the new default (3n/5), 1 sign call at every size:
+**0.60×/0.67×/0.65× dgeev**, dlam 3.4e-14 / 3.9e-14 / 6.1e-13, contamination
+0.4–3.0%. The Python solver had the identical defect and gains more, being
+iteration-bound rather than kernel-bound: **412 → 207 ms at n=200 and
+1315 → 748 ms at n=400.** Both defaults are now 3n/5.
+
+The gain is FLAT from 0.55n to 0.90n, so the constant is not delicate; what
+matters is being strictly above n/2 while staying well below n, so a genuinely
+LOPSIDED split still leaves a big block that recurses. **Third appearance of
+the leaf lesson (#17, #25)** — and the first two were both "the leaf is too
+deep", which is exactly why this one was invisible: it is the same mistake
+wearing the opposite sign.
+
+**A cross-check that now closes.** #27 reported the isolated `matrix_sign`
+call and the in-solve attribution disagreeing (49.2 vs 74.8 ms at n=400) and
+declined to interpret it. With one sign call per solve they agree exactly —
+15.7 vs 15.7, 49.2 vs 50.8, 321.6 vs 314.2 — so the discrepancy was entirely
+the second call, not a harness artifact. Declining to explain it at the time
+was the right call.
+
+**Twelfth measurement lesson, and it is about writing, not measuring.** The
+counters cost twenty minutes; the wrong explanation would have sent the next
+reader hunting a retry that does not exist. *An explanation adjacent to a
+measurement inherits none of its credibility.* #27's number (2 sign calls)
+was solid and its cause was invented, and nothing in the prose marked the
+seam. The entry has been corrected in place rather than left standing with a
+footnote.
+
+**Where sign now sits, and the next target.** Phase split at the new default:
+sign 54–61%, leaves 22–30%, pivoted QR 11–13%, the `QᵀAQ` gemms 2.4%. One
+sign evaluation costs 0.77–1.02× the *entire* dgeev solve, so sign must get
+cheaper for SDC to reach parity. The specific opening, from the flop model:
+a Newton step (gemm + `dgetrf` + `dgetri` ≈ 4n³) and a Newton–Schulz step
+(two gemms ≈ 4n³) cost the SAME arithmetic, but NS is pure gemm while Newton
+is two factorizations that do not run at gemm rate — so at equal flops NS
+should be wall-cheaper, and the switch threshold `ns_switch = 0.6` is
+probably conservative. At n=800 the run spends 10 Newton steps against 6 NS.
+Sweeping that threshold is the next tick and it is a one-parameter job.
