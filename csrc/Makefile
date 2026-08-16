@@ -22,10 +22,19 @@ bench: purify_eigh.c bench.c
 	@test -n "$(BLAS)" || { echo "no BLAS found; set BLAS=/path/to/lib"; exit 1; }
 	$(CC) $(CFLAGS) -o $@ purify_eigh.c bench.c $(BLAS) $(LDFLAGS)
 
+sdc_bench: sdc_eig.c sdc_bench.c sdc_eig.h
+	@test -n "$(BLAS)" || { echo "no BLAS found; set BLAS=/path/to/lib"; exit 1; }
+	$(CC) $(CFLAGS) -o $@ sdc_eig.c sdc_bench.c $(BLAS) $(LDFLAGS)
+
+all: bench sdc_bench
+
 run: bench
 	./bench 5
 
-clean:
-	rm -f bench
+run-sdc: sdc_bench
+	./sdc_bench 3
 
-.PHONY: run clean
+clean:
+	rm -f bench sdc_bench
+
+.PHONY: all run run-sdc clean

@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #26)*
+*(rewritten each tick; as of attempt #27)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -126,6 +126,24 @@ optimization that could be replaced by the solver's own convergence flag; it
 is the only thing standing between a column-separable method and a silently
 rank-deficient answer. Same shape as #15's verdict that off(B) in a skewed
 frame certifies nothing: *a local residual is not a global certificate.*
+
+**The compiled SDC settles #25's paradox: the ledger was right, NumPy was
+the gap (#27).** A C port on the same OpenBLAS takes SDC from 7.7–14× slower
+than dgeev to **1.6–1.8× slower** (0.56×/0.61×/0.61× at n=200/400/800) — a
+**5–8× implementation gain**, against the symmetric port's 1.3× (#23). So
+`sdc.py`'s founding claim — a method doing several times more arithmetic
+still wins when the arithmetic is gemms — was true in the operation ledger
+and false at the wall *only because of the implementation*, and the wall has
+now moved most of the way to meet the ledger. The non-symmetric side was far
+more substrate-bound than the symmetric one, which is itself the lesson: the
+more a method leans on kernels NumPy cannot express (here `dgetri`, and
+fused passes over n² that NumPy pays as separate temporaries **every**
+iteration), the larger the compiled gain. Phase attribution, now stable
+across three sizes: sign 66–71%, leaves 15–19%, pivoted QR 13–14%, gemms
+2.6%. **The named remainder: two sign evaluations per solve where one is
+needed** — the centred shift `tr(A)/n` is rejected on Ginibre and a
+perturbed one succeeds — worth ~1/3 of the run, which is most of what still
+separates SDC from parity.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -315,6 +333,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 27 | **SDC in a compiled language** (user request) — `csrc/sdc_eig.c`, same OpenBLAS | **0.56×/0.61×/0.61× dgeev at n=200/400/800, from Python's 0.07×/0.13× — a 5–8× implementation gain.** #25's ledger was right; NumPy was the whole gap. Sign is 66–71%, and one wasted shift retry is ~1/3 of the run. |
 | 26 | **Can IPT run on the separated eigenvalues while another algorithm takes the rest?** (user question) — column split, shipped as `ipt_hybrid_eigh` | **yes, and exactly: 1.3e-15–8.6e-15 where plain IPT fails at 7e-07–1e-04.** Speed is parity (0.97–1.08×) — the split buys ADMISSION, not throughput. Screen is a SAFETY property: unscreened, two columns converge to the *same* eigenpair. `ipt_rate_columns` vectorized, bit-identical, 2.4–4.6×. |
 
 ### 1. SSJ-BC — verified
@@ -1794,3 +1813,73 @@ inputs it was given; the case a function exists to catch is the one to feed it
 first.** Caught by writing the degeneracy test, not by the benchmark.
 
 179 tests pass.
+
+### 27. SDC in C — the ledger was right and NumPy was the whole gap
+
+**The contradiction this settles.** #25 left the non-symmetric side with a
+clean paradox: SDC-by-sign has *operation-count parity* with dgeev (88
+gemm-equivalents against 89) yet lost 7.7–14× at the wall, with the entire
+discrepancy inside one function, `matrix_sign`. Either that gap was NumPy
+substrate — as the symmetric side's partly was (#13/#23) — or the operation
+model was wrong. A compiled port linking the SAME OpenBLAS decides it.
+
+**Result: the model was right.** `csrc/sdc_eig.c` + `csrc/sdc_bench.c`,
+Ginibre, interleaved min-of-5, contamination 0.0–1.3%, accuracy asserted
+first:
+
+```
+   n   sdc_c      dgeev    ratio    dlam      Python was
+ 200   30.1 ms    17.0 ms  0.56x    3.8e-14   0.07x
+ 400  112.9 ms    68.8 ms  0.61x    4.0e-14   0.13x
+ 800  559.6 ms   341.4 ms  0.61x    6.1e-13   —
+```
+
+**From 7.7–14× slower to 1.6–1.8× slower — a 5–8× implementation gain**,
+against the symmetric port's 1.3× (#23). The non-symmetric side was far more
+NumPy-bound than the symmetric one, and now nearly all of it is recovered.
+
+What did it, in the order the flop model ranks it: `dgetri` for the inverse
+instead of `lu_solve` against a materialized n×n identity (4n³/3 against
+2n³/3 + 2n³, and no identity ever formed); `‖X²−I‖_F` computed in one pass
+over X² without materializing the difference, on *every* iteration; the
+Newton combination `(μX + X⁻¹/μ)/2` as one fused pass instead of four; the
+Newton–Schulz target `1.5I − 0.5X²` built in place over X²; and no allocation
+anywhere in the iteration, which ping-pongs two preallocated buffers.
+
+**The phase attribution, now trustworthy.** Accumulated wall across whole
+timed runs rather than #25's single-shot cache-cold decomposition, and stable
+across three sizes: **sign 66–71%**, leaves 15–19%, pivoted QR 13–14%, the
+two `QᵀAQ` gemms 2.6%. One *isolated* sign evaluation costs 0.79–1.04× the
+entire dgeev solve — down from 6.3× in Python, which is exactly the term that
+moved.
+
+**And the remaining gap has a name.** On Ginibre the solver takes **2 sign
+calls per solve where 1 is needed**: the first shift, `centre = tr(A)/n ≈ 0`,
+is rejected and a perturbed shift succeeds. The planted-real case needs only
+1. Since sign is ~2/3 of the run, the wasted retry is ~1/3 of the total —
+remove it and SDC lands at roughly parity with dgeev in wall, matching where
+it already sits in the operation ledger. *Why* the centred shift is rejected
+is not established here and is not claimed; Ginibre's spectrum is a disk
+about the origin, so a split at Re(z) = 0 puts eigenvalues arbitrarily close
+to the splitting line, but which guard fires (rank, singular iterate, or the
+1e-6 backward-error check) needs measuring, not reasoning. That is the next
+tick, and it is a one-counter job.
+
+**A test-matrix trap, caught by making the case validate itself.** My first
+`planted_real` used strictly-upper entries of magnitude 0.3, and SDC "failed"
+on it at 2.7e-03 to 6.9e-02 with all 12 shifts rejected. The decisive check
+was not to debug SDC but to ask what dgeev does: **dgeev itself misses the
+planted spectrum by 1.5e-01 to 2.0e-01 there.** The construction is
+hyper-non-normal and its eigenvalues are simply ill-conditioned, so nothing
+measured on it says anything about a solver. At 0.005 both dgeev and SDC
+recover the planted values to 1.7e-14 (n=200) to 8.5e-13 (n=800), and SDC
+needs a single sign call. The bench now prints the dgeev-vs-planted distance
+every run so the case cannot silently rot back into meaninglessness.
+**Eleventh measurement lesson: when a solver fails a synthetic case, measure
+the INCUMBENT on that case before believing the failure is the solver's.**
+
+Also carried over from the symmetric side and load-bearing here: spectra are
+compared by nearest-match, never by sorting. A real matrix has exact
+conjugate pairs whose real parts tie, so a lexicographic sort reports errors
+of order 2|Im λ| that do not exist — that bug cost a full re-measurement
+earlier in this session and is now commented at the comparison site.

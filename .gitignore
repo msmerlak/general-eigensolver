@@ -4,3 +4,7 @@ __pycache__/
 build/
 dist/
 .pytest_cache/
+
+# compiled benchmarks (csrc/Makefile)
+csrc/bench
+csrc/sdc_bench
