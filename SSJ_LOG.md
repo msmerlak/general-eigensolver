@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #37)*
+*(rewritten each tick; as of attempt #38)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 38 | **Device-leaf run** (user ran it) | prediction held in DIRECTION (loses at 1024), off 8–15% in magnitude. Best SDC: **1.39× / 1.15× / 0.79×** vs `cupy.linalg.eig`. **The win is confirmed CPU-bound** — at n=256 a 128×128 device eig costs 54.1 ms against a host round trip's 15.1. Crossover measured at 384–512 (`LEAF_DEVICE_MIN` 384→450). Accuracy loss localized to the SPLIT: all four leaf strategies give identical 4.2e-11. |
 | 37 | **Solve leaves on the device** (user request) | `leaf_solver` gains `device`/`auto`; SDC becomes a PRECONDITIONER for `cupy.linalg.eig`. Crossover measured between 256 and 512, and 3n/5 puts leaves right on it. **Prediction recorded: preconditioning loses narrowly at n=1024** (~868 vs 790 ms) because `eig` scales 3.07× not 8× from 512→1024. |
 | 36 | **The SDC GPU run** (user ran it) | **first win over a vendor eigensolver in the whole campaign: 1.13× cupy.linalg.eig at n=512** (1.08× at 256, 0.62× at 1024). Three predictions falsified: cupy HAS `eig`; `leaf=deep` is 4.4–16.4× SLOWER not faster; and my gemm-eq column was mixed-device. `scale=none` wins 1.1–2.1× and is now default. |
 | 35 | **A standalone SDC notebook** (user request) — `sdc_gpu_colab.ipynb` | probe measures SDC's OWN operations (gemm/inverse/QR in gemm-equivalents), not the fp32:fp64 ratio. Found a 2-factorizations-per-step regression in #34's port; **first race of determinantal scaling: unscaled costs +1..+2 steps of 10-15 to save 33% per far-field step.** |
@@ -2642,3 +2643,62 @@ not crash or change the answer, but it does **not** exercise
 Also added: opt-in phase profiling (`profile=True`) accumulating split and
 leaf time separately, off by default so a sync per phase never perturbs the
 race it is meant to explain.
+
+### 38. Device leaves measured — the prediction held in direction, and the win is confirmed CPU-bound
+
+**#37 recorded a prediction before the run: preconditioning loses narrowly at
+n=1024 (~868 ms against 790) and is a wash at n=512 (~259 against 257).
+Measured: 999.7 and 278.5.** Direction right at both sizes, magnitude off by
+15% and 8%. The estimate was built from #36's phase decomposition, so it was a
+model of an implementation rather than a guess — and it under-predicted the
+split cost, not the leaf cost.
+
+**SDC's standing against the real incumbent, best configuration at each size:**
+
+```
+    n   cupy.linalg.eig          SDC        ratio
+  256           87.3 ms   63.0 (host)        1.39x   win
+  512          259.2 ms  224.7 (auto)        1.15x   win
+ 1024          786.3 ms  997.8 (auto)        0.79x   loss
+```
+
+Device leaves are a real gain where they apply — n=1024 went from 1271.5 ms
+(#36, host leaves) to 997.8, a **1.27× improvement** — but not enough to
+overturn the size trend.
+
+**The uncomfortable implication from #37 is CONFIRMED: the win is a property
+of this machine's CPU/GPU balance, not of the algorithm.** At n=256 the leaves
+are ~128, and `leaf=host` (63.0 ms) beats `leaf=device` (116.1 ms) by 1.84×
+— because a 128×128 `cupy.linalg.eig` costs **54.1 ms against a host round
+trip's 15.1 ms**. SDC wins at n=256 by handing work to a CPU that is simply
+better at small blocks. Reporting that as a GPU result would be wrong.
+
+**The crossover, measured directly:**
+
+```
+  leaf size    host    device    winner
+        128    15.1      54.1    host
+        256    70.1      94.2    host
+        384   154.8     166.6    host
+        512   433.3     246.2    device
+        768   830.6     455.7    device
+```
+
+Host wins **through 384**; device takes over by 512. `LEAF_DEVICE_MIN` was set
+to 384 in #37 and that was too low — host still won there. Corrected to 450.
+
+**And `cupy.linalg.eig` is nowhere near cubic at these sizes:** 128 → 768 is 6×
+in size but only **8.4× in time** (a cubic would be 216×). It is fixed-cost
+dominated, which is exactly why it loses to a host round trip below ~450 and
+wins comfortably above. That also explains #37's thin margin analysis: halving
+n saves ~1.5× rather than 4×, so splitting to feed it smaller problems buys
+much less than the flop count suggests.
+
+**A free diagnostic on the accuracy problem.** #36 left SDC's accuracy
+degrading with n (3.8e-14 → 2.9e-13 → 3.4e-11) unexplained. This run localizes
+it: at n=1024 **all four leaf strategies report the identical 4.2e-11**, and
+they differ only in how leaves are solved. The error therefore comes from the
+single split, not the leaves — consistent with #24's mechanism, the oblique
+projector norm ‖P‖ growing with n. That narrows the next tick to one place:
+instrument ‖P‖ and the split's ‖A21‖/‖A‖ against n, and check whether the
+1e-6 backward-error gate is simply too loose at scale.
