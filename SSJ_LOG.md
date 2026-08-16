@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #32)*
+*(rewritten each tick; as of attempt #33)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 33 | **The GPU run, on a T4** (user ran it) | **the all-gemm thesis FAILS here: cuSOLVER costs 15.3→6.9→5.4 gemm-equivalents, FEWER than CPU dsyevd's 8-18 and falling with n.** The ladder's premise held (fp32 eigh 3.3-3.9× cheaper) and it still lost: at n=2048 the whole fp64 solve is 5.4 gemms, so not one 5-gemm pair fits. Caveat: a crippled-fp64 die deflates every gemm-eq count. |
 | 32 | **Can the coarse supplier run at 16 or 8 bits?** (user question) | **fp16 and bf16 both reach 1.1e-15 — once the polish guard is loosened; fp8 cannot (beyond the ladder's hard wall).** The shipped guard is a constant fitted to fp32 and is the only thing blocking 16-bit. But no constant works for fp16 across GOE *and* clusters, so it must become adaptive. |
 | 31 | **Work on SDC** (user) — shift probe, which found a catastrophe instead | **#29's `ns_switch=0.9`, swept on Ginibre alone, made SYMMETRIC input 54× slower than dgeev** (665 iters, 12 failed shifts, fallback). NS's region is in the operator norm; dev is Frobenius/√n. Correct test is ‖I−X²‖_F < 1 = a 1/√n scaling law. **symmetric n=800: 13448 → 422 ms.** |
 | 30 | **Work on SDC** (user) — scaling sweep, then the far-field convergence test | **scaling refuted too (unscaled ≈ determinantal; pre-scale worth 0 iterations), but half a far-field step was a gemm that only tested convergence.** Gate on the Newton update norm: **0.67×/0.73×/0.73× dgeev**, identical iteration counts; Python 207→124 / 748→587 ms. Surfaced a pre-existing silent non-convergence. |
@@ -2308,3 +2309,75 @@ eigenvalues is a valid invariant subspace. The split stays exact; only the
 bisection balance shifts. "Rank wrong" was my comparison being wrong about
 what SP2 promises, for the third time this session that a harness assumption
 masqueraded as a result.
+
+### 33. The GPU run: the all-gemm thesis fails on a T4, and the reason is measurable
+
+**The notebook's founding premise, stated at #12 and never tested until now:**
+`syevd` spends much of its time in memory-bound `symv` inside the tridiagonal
+reduction, which GPUs execute badly, so the incumbent's cost *in gemm-
+equivalents* should RISE on a GPU and open room for an all-gemm method.
+
+**Measured on a Tesla T4 (fp32:fp64 = 14.6:1), it falls instead.**
+
+```
+    n   fp64 gemm   cuSOLVER fp64 eigh   in gemm-equivalents   CPU dsyevd was
+  512     1.45 ms             22.14 ms                 15.3          8-18
+ 1024    10.86 ms             75.38 ms                  6.9
+ 2048    72.02 ms            386.74 ms                  5.4
+```
+
+cuSOLVER is *more* gemm-efficient than dsyevd, not less, and it improves with
+size. By cell 11's own criterion — "cuSOLVER still under ~15: the all-gemm
+argument does not pay off here, and that is a real finding" — this is that
+finding. Purification confirms it from the other side: 82 → 64 → 60
+gemm-equivalents (full) and 42 → 24 → 20 (mixed), against an incumbent at
+5.4. Its ratio to cuSOLVER gets WORSE with n (2.7 → 3.4 → 3.7).
+
+**The ladder's premise held and the ladder still lost, which is the sharper
+result.** fp32 `eigh` measured **3.3–3.9× cheaper** than fp64 `eigh` — exactly
+the cheap coarse supplier the CPU lacked (where the ratio was 1.0, substrate
+ambush #6). So the design got its substrate. The arithmetic that killed it:
+
+```
+    n   eigh gemm-eq   fp32 eigh gemm-eq   budget for ladder   pairs affordable
+  512           15.3                3.98                11.3               2.26
+ 1024            6.9                1.77                 5.2               1.03
+ 2048            5.4                1.61                 3.8               0.75
+```
+
+A ladder pair is ~5 gemms. **At n=2048 the entire fp64 solve costs 5.4 gemms,
+so not even ONE pair fits underneath it.** Confirmed at the wall where the
+answer was accurate: n=512 with 3 pairs gave 1.3e-15 in 28.3 ms against
+cuSOLVER's 21.9 ms — 0.78×, and 28.3 ≈ 5.77 (coarse) + 3 × 5 × 1.45 (ladder)
+to within a millisecond.
+
+**And at n ≥ 1024 the ladder did not even reach fp64: it stalled at 5.3e-08
+(n=1024) and 1.0e-07 (n=2048), identically at 2 and 3 pairs.** That is #32's
+mechanism arriving on real hardware — the polish guard discarding the
+corrections it needs — one tick after the CPU predicted it. Whether the
+trigger is the guard or a cuSOLVER fp32 residual worse than #32's
+exact-eigh-rounded model is not established here and is not claimed. The
+harness refused to time those rows, which is the accuracy-before-timing rule
+doing its job.
+
+**The load-bearing caveat, which my own cell failed to state.** The
+gemm-equivalent unit is t_method / t_fp64_gemm, so an fp64-crippled card
+inflates the denominator and **deflates every gemm-equivalent count on the
+page, cuSOLVER's included**. The T4 ran fp64 gemm at 239 GFLOP/s; an A100 is
+~80× that. The same cuSOLVER solve would then cost the same seconds but many
+more gemm-equivalents — plausibly back in the 20–40 range where a 5-gemm pair
+fits comfortably. **So this is a verdict about this card, not about the
+design.** Cell 1 has always warned that a null fp64 result on a T4 is not a
+null result; cell 10 did not carry the same warning, and now does.
+
+**Two harness faults of mine, both now fixed.** The `cuSOLVER fp64 (ref)` row
+was marked "BEATS cuSOLVER" at 1.01× — it was the reference timed against its
+own stored time, winning by noise. And cell 10 shipped without the deflation
+caveat above, which is the single most important thing needed to read its own
+table.
+
+**Verdict.** On a T4 the all-gemm thesis fails and coarse+ladder loses, both
+for the same measurable reason: the incumbent is too cheap in gemm units on
+this die. The experiment that would settle it is unchanged and now much
+better specified — **the same notebook on an A100 or V100**, where the
+question is simply whether cuSOLVER's gemm-equivalent count rises above ~10.
