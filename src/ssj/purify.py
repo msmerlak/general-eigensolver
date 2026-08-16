@@ -45,6 +45,33 @@ def _bounds(A, iters=30):
     return float(np.min(d - r)), float(np.max(d + r))
 
 
+def _bounds_tight(A, iters=15):
+    """Near-tight symmetric bounds: power iteration on A^2 (robust to the
+    +-lambda near-ties of flat spectra), inflated 25%, clipped to the
+    Gershgorin enclosure.
+
+    Why it exists: Gershgorin measured 12.5x loose on GOE n=800, and the
+    SP2 seed slope is inversely proportional to the enclosure width, so a
+    12.5x-loose enclosure costs ~log2(12.5) ~ 4 extra doubling iterations
+    per split. A 10%-inflated power estimate keeps the true spectrum inside
+    [0,1] after seeding; small spills are erased by the McWeeny warmup
+    anyway (both endpoints attract: f(1+e) = 1 - 3e^2 + O(e^3)).
+    """
+    n = A.shape[0]
+    v = 1.0 + 0.01 * np.arange(n)
+    v /= np.linalg.norm(v)
+    est = 0.0
+    for _ in range(iters):
+        w = A @ (A @ v)
+        est = float(np.linalg.norm(w))
+        if est == 0.0:
+            return _bounds(A)
+        v = w / est
+    m = 1.25 * float(np.sqrt(est))
+    glo, ghi = _bounds(A)
+    return max(-m, glo), min(m, ghi)
+
+
 def purify(P, tol=1e-12, max_iter=100, count=None, precision="full",
            switch=1e-4):
     """Iterate P <- P^2(3I - 2P) to the nearest idempotent.
@@ -148,23 +175,58 @@ def _sp2_projector(A, mu, tol=1e-12, max_iter=100, warmup=6, dtype=None):
     runs until round(trace) is trustworthy as the rank.
     """
     n = A.shape[0]
-    lo, hi = _bounds(A)
-    c = 0.5 / max(hi - mu, mu - lo, 1e-300)
-    P = -c * A
-    P.flat[:: n + 1] += 0.5 + c * mu
-    if dtype is not None:
-        P = P.astype(dtype)
-    for _ in range(warmup):
-        P2 = P @ P
-        P = 3.0 * P2 - 2.0 * (P @ P2)
-    r = float(np.rint(np.trace(P.astype(np.float64))))
-    for it in range(max_iter):
-        P2 = P @ P
-        # the check is an O(n^2) pass; every 3rd iteration is plenty
-        if it % 3 == 0 and \
-                float(np.linalg.norm(P2 - P, "fro")) < tol * np.sqrt(n):
-            break
-        P = P2 if np.trace(P) - r > 0 else 2.0 * P - P2
+    # Tight bounds are an ESTIMATE (power iteration converges slowly on
+    # clustered spectra, and an under-enclosure spills eigenvalues outside
+    # [0,1], where SP2's squaring branch diverges -- observed as fp32 NaN).
+    # There is no cheap deterministic upper enclosure from one vector, so:
+    # try tight, detect a non-finite trace after warmup, and rebuild from
+    # the Gershgorin enclosure, which is exact.
+    for bounds_fn in (_bounds_tight, _bounds):
+        lo, hi = bounds_fn(A)
+        c = 0.5 / max(hi - mu, mu - lo, 1e-300)
+        P = -c * A
+        P.flat[:: n + 1] += 0.5 + c * mu
+        if dtype is not None:
+            P = P.astype(dtype)
+        # Preallocated ping-pong buffers: the loop's temporaries measured
+        # ~1 ms per iteration at n=800 -- comparable to the sgemm itself.
+        P2 = np.empty_like(P)
+        T = np.empty_like(P)
+        for _ in range(warmup):                   # McWeeny, in place
+            np.matmul(P, P, out=P2)
+            np.matmul(P, P2, out=T)
+            P2 *= 3.0
+            T *= 2.0
+            np.subtract(P2, T, out=P)
+        tr = float(np.trace(P.astype(np.float64)))
+        if not np.isfinite(tr):
+            continue                              # under-enclosure: retry
+        r = float(np.rint(tr))
+        ok = True
+        prev_err = np.inf
+        for it in range(max_iter):
+            np.matmul(P, P, out=P2)
+            # the check is an O(n^2) pass; every 3rd iteration is plenty --
+            # and it doubles as the divergence guard: an under-enclosed
+            # eigenvalue can survive the warmup (McWeeny's attractor basin
+            # reaches ~1.37) and only explode under SP2's squaring branch
+            if it % 3 == 0:
+                err = float(np.linalg.norm(P2 - P, "fro"))
+                if err < tol * np.sqrt(n):
+                    break
+                if not np.isfinite(err) or err > 1e3 * prev_err:
+                    ok = False                    # diverging: retry bounds
+                    break
+                prev_err = err
+            if np.trace(P) - r > 0:
+                P, P2 = P2, P                     # P <- P^2 is a swap
+            else:
+                P *= 2.0                          # P <- 2P - P^2 in place
+                P -= P2
+        if ok:
+            return P.astype(np.float64), int(r)
+    # unreachable in practice: the Gershgorin enclosure is exact, and inside
+    # [0,1] both branches are contractions toward {0, 1}
     return P.astype(np.float64), int(r)
 
 
@@ -180,14 +242,17 @@ def _ipt_polish(A, w, V):
     coupling is noise (inside a cluster the subspace is already invariant).
     """
     B = V.T @ (A @ V)
-    B = (B + B.T) / 2.0
+    B += B.T
+    B *= 0.5
     d = np.diag(B).copy()
-    W = B - np.diag(d)
+    np.fill_diagonal(B, 0.0)                      # B is now W, in place
     gap = d[None, :] - d[:, None]
     np.fill_diagonal(gap, 1.0)
     with np.errstate(divide="ignore", invalid="ignore"):
-        C = W / gap
-    C[np.abs(gap) < 1e3 * np.abs(W)] = 0.0
+        C = np.divide(B, gap, out=gap)            # C reuses the gap buffer
+    # the guard |gap| < 1e3|W| is exactly |C| > 1e-3 -- and phrasing it on C
+    # also absorbs the inf (gap ~ 0) and NaN (0/0) cases in one mask
+    C[~(np.abs(C) <= 1e-3)] = 0.0
     np.fill_diagonal(C, 1.0)
     V2 = V @ C
     V2 /= np.linalg.norm(V2, axis=0, keepdims=True)
@@ -273,6 +338,11 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
         leaf = max(64, n // 2)
     if rng is None:
         rng = np.random.default_rng(0x5D1)  # deterministic by default
+    global _G_CACHE
+    try:
+        _G_CACHE
+    except NameError:
+        _G_CACHE = {}
     if n <= leaf:
         return np.linalg.eigh(A)
     mixed = precision == "mixed"
@@ -281,7 +351,9 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
                           dtype=(np.float32 if mixed else None))
     if r <= 0 or r >= n:  # spectrum did not split at the mean: fall back
         return np.linalg.eigh(A)
-    G = rng.standard_normal((n, n))
+    if n not in _G_CACHE:                  # deterministic; ~8 ms at n=800
+        _G_CACHE[n] = rng.standard_normal((n, n))
+    G = _G_CACHE[n]
     Y = np.empty((n, n))
     Y[:, :r] = P @ G[:, :r]
     Y[:, r:] = G[:, r:] - P @ G[:, r:]
@@ -302,6 +374,14 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
     V = np.empty((n, n))
     V[:, :r] = Q[:, :r] @ V1
     V[:, r:] = Q[:, r:] @ V2
+    # Boundary audit, free after recursion: if the split point landed inside
+    # a tight cluster (boundary gap below ~1e-7 of scale), the two blocks
+    # each hold a fragment of it and no polish can reunite them -- the fp32
+    # route cannot even see 1e-9 structure to avoid the cut. Rare; fall back.
+    if w1.size and w2.size and \
+            abs(float(w2.min()) - float(w1.max())) < 1e-7 * max(
+                abs(float(w1.max())), abs(float(w2.min())), 1e-300):
+        return np.linalg.eigh(A)
     w = np.concatenate([w1, w2])
     order = np.argsort(w, kind="stable")
     w, V = w[order], V[:, order]
@@ -313,9 +393,13 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
         # congruence lesson of SSJ_LOG #15/#19). One NS step (2 gemms) takes
         # a 1e-8 defect to 1e-16 and keeps the refinement quadratic:
         # 2e-4 -> 3e-8 -> 2e-12 -> 2e-15 measured per step at n=800.
-        for _ in range(2 if mixed else 1):
+        pairs = 2 if mixed else 1
+        for k in range(pairs):
             w, V = _ipt_polish(A, w, V)
-            if mixed:
+            if mixed and k < pairs - 1:
+                # NS only BETWEEN polish steps: the final polish leaves an
+                # orthogonality defect of (its input error)^2 ~ 1e-16, so a
+                # trailing NS step is 2 wasted gemms
                 G = V.T @ V
                 V = V @ (1.5 * np.eye(n) - 0.5 * G)
     return w, V

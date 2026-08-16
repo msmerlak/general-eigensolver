@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #20)*
+*(rewritten each tick; as of attempt #21)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -27,6 +27,23 @@ supplier from history. `refine_eigh` now ships the ladder as a public API:
 upgrade ANY ≳1e-4 basis — a GPU fp16/fp32 eigensolve, a tracked basis,
 either family's split — to fp64 at ~5 gemms per squared digit, no
 factorization.
+
+**Optimization is component profiling plus mechanism-driven guards (#21).**
+The batch: Gershgorin was 12.5× loose on GOE and the SP2 seed slope is
+inversely proportional to the enclosure width — tight power-on-A² bounds
+(inflated 25%, Gershgorin-clipped) cut the linear phase; SP2's loop ran in
+preallocated ping-pong buffers (the P←P² branch is a pointer swap); the
+polish went in-place (|gap| < 10³|W| ⟺ |C| > 10⁻³, one mask absorbing
+inf and NaN); the trailing NS step was dropped (final defect = err² ≈
+1e-16); G is cached. Two robustness mechanisms surfaced and shipped: a
+power-estimate is NOT an enclosure — under-enclosed eigenvalues survive the
+McWeeny warmup (its attractor basin reaches ~1.37) and explode only later
+under SP2's squaring branch, so the divergence guard lives in the periodic
+check and retries from the exact Gershgorin enclosure; and the fp32 route
+can cut *through* a 1e-9 cluster it cannot see, caught by a free post-hoc
+boundary audit (the boundary gap is known after recursion) with an `eigh`
+fallback. **Champion now 4.4×/5.3×/6.7× LAPACK at n=400/800/1600, residuals
+1.3e-15–2.0e-13.**
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -211,6 +228,7 @@ the tail-exclusion path fires.
 | 18 | **Compose the families**: one IPT step polishes the purified basis; SP2 replaces McWeeny; split-verification fallback | **champion at full accuracy: 6.0–9.3× LAPACK, resid 3e-15.** Suite caught SP2×degeneracy; safety net free on the happy path. |
 | 19 | **fp32 splits + the refinement ladder** (consult-A polish ⟂ NS re-orth, alternating) | **champion again: 4.9×/6.7× LAPACK shipped as `precision="mixed"`.** The polish alone floors at err² — the interleaved NS step restores quadratic refinement. |
 | 20 | **Rethink the structure**: is the ladder the whole algorithm? Measure its basin; test fp32-LAPACK coarse | **structure settled: coarse (≲1e-4, precision-free) + ladder (last digits). Basin is SMALL (stalls from 1e-2), ssyevd = dsyevd here (ambush #6). `refine_eigh` shipped as the reusable half.** |
+| 21 | **Optimize the champion**: profile-driven batch (tight bounds, in-place SP2, in-place polish, drop trailing NS, cached G) + two new guards | **4.4×/5.3×/6.7× LAPACK at n=400/800/1600 (from 4.9×/6.7×), all clean runs, full accuracy.** |
 
 ### 1. SSJ-BC — verified
 
@@ -1336,3 +1354,50 @@ supplier (SSJ, purification, LAPACK, a tracked basis — interchangeable,
 precision-free, must deliver ≲1e-3..1e-4) composed with the refinement
 ladder. #19's champion was already its instantiation; this tick named it,
 measured its load-bearing boundary, and shipped its reusable half.
+
+### 21. Profile-driven optimization, and the two guards it forced
+
+Component profile of the shipped mixed champion at n=800 (sums 382 of the
+461 ms measured): SP2 177, polish×2 92, extraction 68, leaves 26, B-form 11,
+G 7.5. The batch, in profile order:
+
+* **Tight bounds.** Gershgorin measured **12.5× loose** on GOE n=800, and
+  the SP2 seed slope ∝ 1/enclosure-width, so looseness costs ~log₂(12.5) ≈ 4
+  doubling iterations per split. Power iteration on A² (robust to the ±λ
+  near-ties of flat spectra), inflated 25%, clipped to Gershgorin.
+* **In-place SP2**: preallocated ping-pong buffers; the P ← P² branch is a
+  pointer swap; the loop's temporaries had measured ~1 ms/iteration.
+* **In-place polish**: the guard `|gap| < 10³|W|` is exactly `|C| > 10⁻³`
+  on the computed correction — one mask, which also absorbs the inf (gap→0)
+  and NaN (0/0) cases; C reuses the gap buffer.
+* **Trailing NS dropped**: the final polish leaves defect (input err)² ≈
+  1e-16; the closing NS step was 2 wasted gemms.
+* **Cached G** (deterministic anyway; ~8 ms at n=800).
+
+**The batch broke two spectra, and both breaks bought permanent guards:**
+
+1. A power estimate is NOT an enclosure. On a clustered spectrum the
+   under-enclosed edge eigenvalue **survived the McWeeny warmup** (its
+   attractor basin extends to ~1.37) and exploded only later under SP2's
+   squaring branch — fp32 NaN with a finite-looking warmup. The divergence
+   guard now lives inside the periodic convergence check (non-finite or
+   1e3×-growing error → retry the whole run from the exact Gershgorin
+   enclosure, which provably cannot spill).
+2. The retuned bounds moved a split point **into a 1e-9 cluster** — the
+   fp32 route cannot see structure below ~1e-7 to avoid the cut, and no
+   polish can reunite a cluster split across two blocks. Caught by a free
+   post-hoc **boundary audit**: after recursion the boundary gap is known;
+   below 1e-7·scale → `eigh` fallback. (The suite caught both breaks —
+   sixth and seventh saves for the spectrum battery.)
+
+**Result, all runs clean (0.4–3.6% contamination), accuracy asserted:**
+
+| n | mixed (was) | now | full | LAPACK |
+|---|---|---|---|---|
+| 400 | 84.4 ms / 4.9× | **53.2 ms / 4.4×** | 71.2 / 5.9× | 12.1 ms |
+| 800 | 461.1 ms / 6.7× | **283.1 ms / 5.3×** | 395.8 / 7.4× | 53.8 ms |
+| 1600 | — | **1761 ms / 6.7×** | 2532 / 9.6× | 264 ms |
+
+Residuals 1.3e-15 / 1.7e-15 / 2.0e-13. First n=1600 measurement of the
+campaign. 168 tests pass. Cold-CPU arc: 28–42× → 16–18× → 6–9× → 4.9–6.7× →
+**4.4–6.7× across a 4× size range.**
