@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #34)*
+*(rewritten each tick; as of attempt #35)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 35 | **A standalone SDC notebook** (user request) — `sdc_gpu_colab.ipynb` | probe measures SDC's OWN operations (gemm/inverse/QR in gemm-equivalents), not the fp32:fp64 ratio. Found a 2-factorizations-per-step regression in #34's port; **first race of determinantal scaling: unscaled costs +1..+2 steps of 10-15 to save 33% per far-field step.** |
 | 34 | **Port SDC into the GPU notebook** (user request) | cells 10–11 added, validated on the NumPy path (7.9e-15..1.0e-11 across Ginibre/planted/near-sym/companion). Two forced changes: randomized range-finder for the split basis (no pivoted QR on device), and a leaf choice — host round trip vs recurse-to-2×2 — because **cuSOLVER appears to have no `geev` at all**. |
 | 33 | **The GPU run, on a T4** (user ran it) | **the all-gemm thesis FAILS here: cuSOLVER costs 15.3→6.9→5.4 gemm-equivalents, FEWER than CPU dsyevd's 8-18 and falling with n.** The ladder's premise held (fp32 eigh 3.3-3.9× cheaper) and it still lost: at n=2048 the whole fp64 solve is 5.4 gemms, so not one 5-gemm pair fits. Caveat: a crippled-fp64 die deflates every gemm-eq count. |
 | 32 | **Can the coarse supplier run at 16 or 8 bits?** (user question) | **fp16 and bf16 both reach 1.1e-15 — once the polish guard is loosened; fp8 cannot (beyond the ladder's hard wall).** The shipped guard is a constant fitted to fp32 and is the only thing blocking 16-bit. But no constant works for fp16 across GOE *and* clusters, so it must become adaptive. |
@@ -2464,3 +2465,57 @@ convergence-test gemm is skipped while the update norm says we are far).
 Not yet run on a card. The cell prints the host round trip's cost in
 gemm-equivalents first, because that single number decides the race: SDC needs
 ~88, so it wins only if the round trip costs more than that.
+
+### 35. A standalone SDC notebook — and the first race of the determinantal scaling
+
+**Deliverable:** `sdc_gpu_colab.ipynb`, 5 cells, self-contained. Split out from
+the symmetric notebook because the two ask different questions and need
+different probes.
+
+**The probe is the interesting difference.** The symmetric notebook measures
+the fp32:fp64 ratio, because that family trades on mixed precision. SDC trades
+on something else: its far-field step is one gemm plus one matrix INVERSE, and
+its split needs one QR. So cell 1 measures gemm, inverse, slogdet and QR *in
+gemm-equivalents*, which predicts SDC's cost before any solver runs — against
+the CPU reference point of gemm 1.00 | inverse 5.35 | QR 7.74 | dgeev 93.9.
+
+**A regression in the earlier port, found while writing this and fixed here.**
+The SDC cells spliced into the symmetric notebook (#34) call `slogdet` AND
+`inv` — **two LU factorizations per Newton step**, where the CPU code
+deliberately shares one. Worth noting what sharing actually buys, because it
+is less than it looks: `lu_factor` + `lu_solve` against a full identity is
+2n³/3 + 2n³ = 2.67n³, and `slogdet` + `inv` is 2n³/3 + 2n³ = 2.67n³. **The
+same.** The genuinely cheaper option is to drop the determinant entirely —
+`inv` alone is 2n³, a 25% cut.
+
+**So `scaling` became a measured option rather than an assumption, and this is
+its first race anywhere.** Iteration counts (load-immune) at n=256:
+
+```
+case                det N/NS   none N/NS   extra steps
+Ginibre                 12/2        13/2            +1
+planted real             7/3         8/4            +2
+near-symmetric           8/4         9/5            +2
+companion                8/4        11/2            +1
+```
+
+Unscaled Newton costs **+1 to +2 steps out of 10–15 (7–20%) to save 33% per
+far-field step**. On CPU that is roughly break-even; on a GPU it turns on how
+expensive the inverse is, which cell 1 now measures directly. Accuracy is
+unaffected and in several cases marginally better (Ginibre n=128: 5.4e-13
+unscaled against 6.9e-13 scaled).
+
+This also softens an earlier reading. The scaling sweep behind #30 found
+determinantal scaling "already best" and unscaled Newton essentially tied —
+true on iteration counts, which is what that sweep measured. It did not price
+the extra factorization, so "best" was a statement about steps, not cost.
+
+**Validated on the NumPy path** against the repository's `sdc_eigvals` across
+Ginibre, planted-real, near-symmetric and companion at n = 128 and 256, in all
+four (leaf × scaling) combinations: 7.2e-15 to 1.0e-11 against the reference's
+8.7e-15 to 1.9e-13.
+
+**Note the duplication.** SDC now exists in two notebooks. The standalone one
+supersedes the cells added to the symmetric notebook in #34 — it has the
+scaling option, the SDC-specific probe, and the shared-LU discussion. The
+#34 cells are correct but older; prefer this one for SDC work.
