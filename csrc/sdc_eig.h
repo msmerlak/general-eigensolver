@@ -30,9 +30,11 @@ typedef struct {
 
 /* Eigenvalues of a general real n x n matrix (column-major) by spectral
  * divide and conquer. wr/wi receive the real and imaginary parts, unsorted.
- * min_block <= 0 selects the measured default max(2, n/2) -- one split, both
- * halves to dgeev (SSJ_LOG #25: recursing to 2x2 is 4x slower, no more
- * accurate). `st` may be NULL. */
+ * min_block <= 0 selects the measured default 3n/5 -- one split, both halves
+ * to dgeev. Two measured constraints, not one: recursing to 2x2 is 4x slower
+ * and no more accurate (SSJ_LOG #25), and a leaf of exactly n/2 costs a
+ * SECOND sign iteration because the centred split returns r near but not on
+ * n/2 (SSJ_LOG #28, worth 1.10x-1.16x). `st` may be NULL. */
 void sdc_eigvals_c(const double *A, int64_t n, double *wr, double *wi,
                    int64_t min_block, sdc_stats *st);
 

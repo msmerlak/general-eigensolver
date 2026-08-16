@@ -190,21 +190,34 @@ def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
     Globally convergent and free of any near-diagonal or normality
     requirement: every transformation applied is an orthogonal similarity.
 
-    min_block : recurse until blocks are this small; default max(2, n//2),
-        i.e. ONE split, both halves to dgeev. Recursing to 2x2 (the previous
-        default) measured 4x slower on Ginibre n=400 -- 21.1x dgeev against
-        5.3x -- and no more accurate. This is the same leaf lesson the
-        symmetric solver learned in SSJ_LOG #17: each level's split costs a
-        full-size sign iteration, while a dense solve of the block is
-        milliseconds, so deep recursion pays splits to avoid work that was
-        never expensive.
+    min_block : recurse until blocks are this small; default max(2, 3n//5),
+        i.e. ONE split, both halves to dgeev. TWO measured constraints pin
+        this, and they bracket it from opposite sides.
+
+        From below: recursing to 2x2 (the original default) measured 4x
+        slower on Ginibre n=400 -- 21.1x dgeev against 5.3x -- and no more
+        accurate. Each level's split costs a full-size sign iteration while a
+        dense solve of the block is milliseconds, so deep recursion pays
+        splits to avoid work that was never expensive (SSJ_LOG #17, #25).
+
+        From above: n//2 is too SMALL, which is the non-obvious half. The
+        centred split returns r = trace(P), which lands near n/2 but
+        essentially never on it, so one half comes back a few rows too big
+        and triggers a whole second sign iteration -- and sign is ~2/3 of the
+        run. Measured on Ginibre: 412 ms -> 207 ms at n=200 and 1315 ms ->
+        748 ms at n=400 moving the leaf from 0.5n to 0.6n, accuracy
+        unchanged at 4.4e-14 / 5.8e-14 (SSJ_LOG #28). The C port shows the
+        same effect at 1.10x-1.16x, and it is flat from 0.55n to 0.9n, so the
+        constant is not delicate -- what matters is being strictly above n/2
+        while staying well below n, so a genuinely LOPSIDED split still
+        leaves a big block that recurses.
 
     `count` optionally accumulates {"gemm", "inv", "qr"} operation counts.
     """
     A = np.asarray(A, dtype=np.float64)
     n = A.shape[0]
     if min_block is None:
-        min_block = max(2, n // 2)
+        min_block = max(2, 3 * n // 5)
     if _rng is None:
         _rng = np.random.default_rng(0)
     if count is not None and "_N" not in count:

@@ -430,7 +430,18 @@ void sdc_eigvals_c(const double *A, bi n, double *wr, double *wi, bi min_block,
     if (st) memset(st, 0, sizeof(*st));
     g_rs = 0x5D1ULL;                          /* reproducible shift retries */
     if (min_block <= 0) {
-        min_block = n / 2;
+        /* 3n/5, NOT n/2. The centred split returns r = trace(P), which lands
+         * NEAR n/2 but essentially never ON it, so with a leaf of exactly n/2
+         * one half is a few rows too big and buys a whole second sign
+         * iteration -- ~1/3 of the run -- to shave a dgeev that was already
+         * cheap. Measured on Ginibre: 2 sign calls at 0.5n against 1 at every
+         * fraction from 0.55n to 0.9n, worth 1.10x-1.16x with identical
+         * accuracy, and flat across that whole range so the constant is not
+         * delicate. Above 0.5n but well below 1 keeps the other property that
+         * matters: a genuinely LOPSIDED split still leaves a big block that
+         * recurses. Third appearance of the leaf lesson (#17, #25); this time
+         * the wrong leaf was not "too deep" but "off by three". */
+        min_block = (3 * n) / 5;
         if (min_block < 2) min_block = 2;
     }
     sdc_rec(A, n, n, wr, wi, min_block, 0, 1e-12, st);
