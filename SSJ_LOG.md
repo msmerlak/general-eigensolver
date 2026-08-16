@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #22)*
+*(rewritten each tick; as of attempt #23)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -58,6 +58,17 @@ sgemm is 2× dgemm, but ssyevd, sgeqrf and ssytrf all run at fp64 speed —
 which is exactly why the SP2 phase (pure gemm) is the only place mixed
 precision ever bought anything here, and why tensor-core substrates change
 every one of these verdicts at once.
+
+**The compiled port confirms the substrate thesis, partially (#23).** A C
+implementation linking the SAME OpenBLAS lands **3.3×/4.3×/5.2× dsyevd**
+against Python's 4.2×/5.3×/6.7× — a 1.3× implementation gain from `dsymm`
+(half-flop symmetric products NumPy's `@` cannot express), `dsyrk`, one
+fused pass where NumPy needs six, and no allocation in any loop. But it does
+NOT reach #13's flop-model prediction of 2–3×, and the reason is now visible:
+the ratio *grows with n* (3.3 → 5.2 over a 4× size range) because dsyevd's
+own leaves and the O(n³) split both scale the same, while dsyevd's constant
+improves with size. The algorithm's flop deficit is real, not an artifact —
+#13 was right that ~1.3× was substrate and wrong that all of it was.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -244,6 +255,7 @@ the tail-exclusion path fires.
 | 20 | **Rethink the structure**: is the ladder the whole algorithm? Measure its basin; test fp32-LAPACK coarse | **structure settled: coarse (≲1e-4, precision-free) + ladder (last digits). Basin is SMALL (stalls from 1e-2), ssyevd = dsyevd here (ambush #6). `refine_eigh` shipped as the reusable half.** |
 | 21 | **Optimize the champion**: profile-driven batch (tight bounds, in-place SP2, in-place polish, drop trailing NS, cached G) + two new guards | **4.4×/5.3×/6.7× LAPACK at n=400/800/1600 (from 4.9×/6.7×), all clean runs, full accuracy.** |
 | 22 | **Cut unnecessary steps**: all-fp32 pipeline, inertia rank, conditional polish, bounds trim | **minimality verdict — three cuts refuted with mechanisms, one at noise level. Every surviving step earns its place; CPU optimization is converged.** |
+| 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 
 ### 1. SSJ-BC — verified
 
@@ -1463,3 +1475,51 @@ B-form, LAPACK leaves, two-pair ladder with mid NS, three safety nets — has
 no removable step and no substitutable kernel left on this substrate.
 53.7 / 300.4 ms (4.2× / 5.3× LAPACK) at n=400/800, full accuracy, clean
 runs. 168 tests pass. What remains is the GPU notebook and the proof.
+
+### 23. The compiled implementation — and what it settles
+
+Attempt #13 claimed the algorithm sits ~2–3× LAPACK in *flop* units and the
+rest of its wall gap is NumPy substrate. That is a falsifiable prediction and
+`csrc/purify_eigh.c` tests it: the same algorithm in C, linking the **same**
+OpenBLAS NumPy uses (`scipy_openblas64`, 64-bit int, `scipy_*_64_` symbols),
+with dsyevd benchmarked through the same binary — so nothing about the
+comparison is cross-library. That mattered: #13's near-miss verdict on
+symmetric BLAS came from SciPy's *wrapper* being 2.6× slower than NumPy's
+`@`, not from the kernels.
+
+**What C buys, in the profile's order:** `dsymm` for A·X (A is symmetric —
+half the flops, and NumPy's `@` cannot express it) in both the B-form and
+every polish step; `dsyrk` for VᵀV in the Newton–Schulz step; the polish's
+correction built in **one fused pass** over n² where NumPy needs ~6
+(subtract, divide, abs, compare, mask-assign, fill-diagonal); zero allocation
+in any loop; SP2 ping-ponging two preallocated fp32 buffers.
+
+**Result — quiet box, interleaved min-of-5, contamination 0.2–0.7%, every
+configuration accuracy-checked before timing:**
+
+| n | C | Python (#22) | dsyevd |
+|---|---|---|---|
+| 400 | **57.8 ms = 3.3×** | 4.2× | 17.6 ms |
+| 800 | **315.0 ms = 4.3×** | 5.3× | 73.9 ms |
+| 1600 | **1880.7 ms = 5.2×** | 6.7× | 361.7 ms |
+
+Accuracy is *better* than the Python route (|Δλ|/‖A‖ 9.0e-16–1.3e-15,
+residual 1.5e-15–1.8e-15) — the fused polish avoids intermediate rounding.
+The full battery passes: GOE, exact 5-fold ties, zero diagonal, and the 1e-9
+cluster at its documented fp32-route floor (2.3e-10), which the harness
+carries as a *per-case documented bar* rather than silently tightening.
+
+**The verdict on #13, stated honestly: half right.** ~1.3× of the gap was
+implementation and is now recovered. The rest is not — and the shape of the
+残り says why: **the ratio grows with n (3.3 → 4.3 → 5.2)**, so this is not a
+constant implementation tax but the algorithm's own asymptotics losing to
+dsyevd's improving constant. The purification recursion does O(n³) work per
+split with a large constant (~55 sgemms) plus two O(n³) LAPACK leaves;
+dsyevd does one O(n³) pass whose efficiency *rises* with n. #13's flop model
+under-counted because it priced the split's gemms at gemm rate but ignored
+that a *bisection* pays them at every level while dsyevd pays once.
+
+Build: `cd csrc && make run` (auto-detects NumPy's OpenBLAS; override with
+`make BLAS=...`). Zero warnings under `-Wall -Wextra`. The C port is also the
+natural GPU starting point: every kernel it calls has a cuBLAS twin, and the
+one place it spends fp32 (SP2) is exactly where tensor cores pay 8–16×.
