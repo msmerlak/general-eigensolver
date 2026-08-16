@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #23)*
+*(rewritten each tick; as of attempt #24)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -69,6 +69,23 @@ the ratio *grows with n* (3.3 → 5.2 over a 4× size range) because dsyevd's
 own leaves and the O(n³) split both scale the same, while dsyevd's constant
 improves with size. The algorithm's flop deficit is real, not an artifact —
 #13 was right that ~1.3× was substrate and wrong that all of it was.
+
+**The non-symmetric case: the architecture transfers, the splitter does not
+(#24).** Purification is a REAL-LINE method — its seed maps lambda to
+0.5 + c(mu - lambda) and the map's attracting basins are bounded regions of
+C, so it diverges on complex pairs (real Ginibre, |Im|/|lambda| = 0.98) and
+on real spectra once eigenvectors are ill-conditioned. The matrix SIGN
+function is the correct substitute in the same architectural slot (gemm-only,
+global basin, splits on the line Re(z) = sigma) and is already in the repo.
+The split then becomes block-TRIANGULAR rather than block-diagonal, and its
+backward error is governed by ||P||, the OBLIQUE projector norm: measured
+||P|| 3.2 -> 1.5e5 and ||A21||/||A|| 1.5e-14 -> 1.6e-9 as cond(X) runs
+10 -> 1e6. **For symmetric A that norm is identically 1** — which is exactly
+why the symmetric method is unconditionally stable and the general one is
+not. The ladder loses its Newton-Schulz half (non-symmetric eigenvectors are
+not orthonormal) but the consult-A half works: 1e-8 -> 2.8e-16 in 4 IPT
+iterations. And the prize is ~7x larger: dgeev costs 131-181 gemm-equivalents
+here against dsyevd's 17-25.
 
 **Substrate ambushes, now six of a kind:** ssyevd runs at dsyevd speed on
 this box (1.01×/0.96× — the fp32-LAPACK-coarse idea dies HERE and is the
@@ -256,6 +273,7 @@ the tail-exclusion path fires.
 | 21 | **Optimize the champion**: profile-driven batch (tight bounds, in-place SP2, in-place polish, drop trailing NS, cached G) + two new guards | **4.4×/5.3×/6.7× LAPACK at n=400/800/1600 (from 4.9×/6.7×), all clean runs, full accuracy.** |
 | 22 | **Cut unnecessary steps**: all-fp32 pipeline, inertia rank, conditional polish, bounds trim | **minimality verdict — three cuts refuted with mechanisms, one at noise level. Every surviving step earns its place; CPU optimization is converged.** |
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
+| 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 
 ### 1. SSJ-BC — verified
 
@@ -1523,3 +1541,72 @@ Build: `cd csrc && make run` (auto-detects NumPy's OpenBLAS; override with
 `make BLAS=...`). Zero warnings under `-Wall -Wextra`. The C port is also the
 natural GPU starting point: every kernel it calls has a cuBLAS twin, and the
 one place it spends fp32 (SP2) is exactly where tensor cores pay 8–16×.
+
+### 24. Non-symmetric: what transfers, what breaks, and why the prize is bigger
+
+Asked directly whether the method works on non-symmetric input. It decomposes
+into three independent questions, and they have three different answers.
+
+**The splitter does NOT transfer.** Purification's seed maps eigenvalue
+lambda to z = 0.5 + c(mu - lambda); for complex lambda that z is complex, and
+`z <- 3z^2 - 2z^3` has attracting basins around 0 and 1 that are *bounded*
+regions of C with a Julia boundary through 1/2. Measured:
+
+| spectrum | purification | matrix sign |
+|---|---|---|
+| non-sym, real spectrum, cond(X)=10 | converges, 31 it | converges, 22 it |
+| non-sym, real spectrum, cond(X)=1e4 | **diverges** | converges (degraded) |
+| real Ginibre, \|Im\|/\|lambda\| = 0.98 | **diverges** | converges, 18 it |
+
+So purification is a real-line instrument. **The matrix sign function is the
+correct substitute in the same architectural slot** — gemm-only, globally
+convergent, splitting on the line Re(z) = sigma instead of a point on R — and
+`ssj.sdc` already implements it with the same Newton -> Newton-Schulz handoff
+pattern the rest of the repo uses.
+
+**The split degrades gracefully, and the mechanism is exactly ||P||.** For
+symmetric A the spectral projector is orthogonal, so ||P|| = 1 identically and
+`Q^T A Q` is block *diagonal*. For non-symmetric A the projector is oblique:
+range(P) is invariant, so the similarity is block *triangular*, and the
+backward error scales with ||P|| = the eigenvector conditioning:
+
+| cond(X) | sign iters | \|\|P\|\|_2 | \|\|P^2-P\|\| | \|\|A21\|\|/\|\|A\|\| |
+|---|---|---|---|---|
+| 1e1 | 22 | 3.2e0 | 1.7e-14 | 1.5e-14 |
+| 1e3 | 60 | 2.0e2 | 1.4e-08 | 1.9e-13 |
+| 1e4 | 60 | 1.8e3 | 4.9e-05 | 4.6e-12 |
+| 1e6 | 60 | 1.5e5 | 3.1e-04 | 1.6e-09 |
+
+It never *fails*; it loses digits in proportion to ||P||. **That single number
+is the whole difference between the symmetric and general problems here**, and
+it is why the symmetric solver's split needs no conditioning caveat at all.
+
+**The ladder half-transfers.** The consult-A IPT step is basis-general and
+works: an fp32 `dgeev` presolve at residual 1.0e-8 refines to **2.8e-16 in 4
+iterations** (measured rate 5.6e-3). The Newton-Schulz half does not transfer
+— non-symmetric eigenvectors are not orthonormal, so re-orthonormalizing
+would destroy the answer. The ladder degenerates to plain IPT, which is what
+`ssj.refine_eig` already is.
+
+**And the prize is ~7x larger.** Measured on this box:
+
+| n | dgeev | dsyevd | ratio |
+|---|---|---|---|
+| 200 | 181 gemm-equiv | 25 | **7.3x** |
+| 400 | 131 gemm-equiv | 17 | **7.8x** |
+
+The whole campaign's thesis is that a gemm-only method wins where the
+incumbent runs far below gemm efficiency. On the symmetric side dsyevd is only
+17-25 gemms and the best this repo achieved is 3.3x *slower* than it. On the
+non-symmetric side the incumbent is 131-181 gemms — the same structural
+argument has seven times more room, and `sdc.py` was already aimed there.
+
+**Two harness bugs caught before any of this was believed**, both mine: I fed
+`matrix_sign`'s `(S, iters)` tuple into arithmetic inside a bare `except`,
+which silently reported "sign FAILS everywhere"; and I built the split basis
+with a pivoted QR of `[P, I-P]`, whose column reordering destroys the range
+separation, reporting ||A21|| = 2.6e-01 for the *symmetric* case where it must
+be ~1e-15. Both were caught by asking why a number contradicted theory rather
+than by the numbers looking bad. Eighth entry in the measurement-lessons
+family: a bare `except` around a numerical call converts a type error into a
+scientific claim.
