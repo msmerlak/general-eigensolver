@@ -6,7 +6,7 @@ before anything else**, one line per attempt, negative results included.
 
 ## What this is teaching us about the eigenvalue problem
 
-*(rewritten each tick; as of attempt #40)*
+*(rewritten each tick; as of attempt #41)*
 
 **The canonical structure, arrived at and then validated by refutation
 (#20): every solver here is a COARSE SUPPLIER plus the REFINEMENT LADDER.**
@@ -340,6 +340,7 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 41 | **Full optimize SDC** (user request, 14-agent workflow) | **the biggest win was a PACKAGING bug: numpy and scipy ship separate OpenBLAS pools and fight on 4 cores — 2.0×–6.1× end to end**, accuracy unchanged. My cost table was stale (inverse 5.35→3.90) and mis-sized two levers. **Protocol sizes were powers of two: dgeev takes an 88% cache penalty at n=512**, so SDC's "win" there was an artifact — off the trap it loses 1.35–1.54×. All five levers refuted or noise. |
 | 40 | **Correction** (user supplied the source) | **cuSOLVER DOES have `xgeev`**; `cupy.linalg.eig` → `_geev` → `cusolver.xgeev`, device-resident. My "no geev" claim was stale across #34–#36. **This strengthens #36: the 1.39×/1.13× wins are over a genuine vendor DEVICE kernel.** Also explains xgeev's un-cubic scaling as a young kernel with large fixed cost. |
 | 39 | **Instrument the split accuracy** (user request) | **cause found: an eigenvalue 1.83e-04 from the splitting line at n=1024.** Moving the shift fixes it 25–250×. The retry machinery already existed; the gate was **1e-6, with 25892× to 17-MILLION× headroom — it had never fired.** Shipped `gate=1e-11`: 99× better accuracy at n=1024, 2.5× sign cost there only, nothing changes at n≤512. |
 | 38 | **Device-leaf run** (user ran it) | prediction held in DIRECTION (loses at 1024), off 8–15% in magnitude. Best SDC: **1.39× / 1.15× / 0.79×** vs `cupy.linalg.eig`. **The win is confirmed CPU-bound** — at n=256 a 128×128 device eig costs 54.1 ms against a host round trip's 15.1. Crossover measured at 384–512 (`LEAF_DEVICE_MIN` 384→450). Accuracy loss localized to the SPLIT: all four leaf strategies give identical 4.2e-11. |
@@ -2823,3 +2824,122 @@ by having written the check into the cell instead of the prose. **A claim about
 what a fast-moving library does not provide has a shelf life**, and mine had
 expired. The habit that worked was making the notebook test it at runtime;
 the habit that failed was repeating it in write-ups as though it were settled.
+
+### 41. Full SDC optimization — the biggest win was a packaging bug, and three of my own numbers were wrong
+
+Ran a 14-agent workflow: five levers analysed in parallel, the promising ones
+implemented and accuracy-validated, each adversarially verified, then **one
+serial agent alone on the box** for all timing (parallel agents benchmarking
+would have contaminated everything). I then re-verified the headline myself.
+
+**THE HEADLINE IS NOT AN ALGORITHM CHANGE.** `ssj.sdc` called scipy's
+`lu_factor` / `lu_solve` / pivoted `qr` inside a numpy-gemm loop. **numpy and
+scipy ship SEPARATE OpenBLAS shared objects** — I confirmed two distinct ones
+mapped into the process — each with its own 4-thread pool. On a 4-core box they
+fight. Controlled same-arithmetic test: **3.48× at n=512, 2.05× at n=1024.**
+scipy's `lu_factor` measured 3.6 ms in isolation and **70 ms inside the solver
+— 19×, same routine, same size.**
+
+Fixed by routing both through numpy (`slogdet` + `inv`) and replacing scipy's
+pivoted QR with the randomized range-finder. My own interleaved verification,
+old vs new in one process, accuracy asserted first:
+
+```
+case              n    old ms    new ms  speedup   numpy ms  new/numpy  contam
+ginibre         256     319.1      52.4    6.08x      28.5      0.54x    0.5%
+ginibre         500     757.9     194.9    3.89x     102.0      0.52x    2.4%
+ginibre        1000    1910.6     949.0    2.01x     462.0      0.49x    2.4%
+near-sym        256      83.8      71.4    1.17x      20.1      0.28x    6.0%
+near-sym        500     234.3     133.7    1.75x      70.4      0.53x    1.4%
+near-sym       1000    1768.6     740.0    2.39x     313.7      0.42x    3.9%
+```
+
+**2.0×–6.1×, accuracy unchanged** (3.6e-14 vs 4.4e-14 at n=256; slightly better
+throughout). And it does **not** change the verdict: SDC still loses to
+`numpy.linalg.eigvals` by ~2× at every size.
+
+**Sharing one LU was never a flop argument.** `lu_factor` + `lu_solve` against a
+full identity is 2n³/3 + 2n³ = 2.67n³; `slogdet` + `inv` is 2n³/3 + 2n³ =
+2.67n³. Identical. The scipy route bought nothing and cost a BLAS boundary
+crossing every iteration.
+
+**MY COST TABLE WAS STALE, and it mis-sized two levers.** Re-measured against a
+gemm on this box:
+
+```
+                       carried   measured
+  inverse                 5.35       3.90     27% cheaper than assumed
+  QR (full)               7.74       8.45
+  pivoted QR (SHIPPED)       —      11.04     6.0% of gemm rate — WORSE than dgeev
+  dgeev                   93.9       82.65
+```
+
+The shipped pivoted QR was **the worst-performing kernel in the entire method**.
+And the inverse being 3.90 rather than 5.35 moves the break-even for swapping
+inverses for gemms from ~13% to ~4–6%, i.e. into the noise — which is exactly
+why Halley measured as noise. **A cost table quoted in a module docstring for
+twenty attempts is a claim, and it had expired.**
+
+**THE PROTOCOL SIZES WERE POWERS OF TWO AND THAT FLATTERED SDC.** `dgeev` takes
+an **88% cache-aliasing penalty at exactly n=512** and 19% at n=1024:
+
+```
+  n=496 1412 | n=504 2037 | n=512 2409 | n=520 1887 | n=528 1812   (ms/n^3)
+  n=1000  796 | n=1024 1057 | n=1040  850
+```
+
+Off the trap, the best SDC variant loses **1.35× at n=500, 1.54× at n=1000,
+1.51× on near-symmetric n=500**. At n=512 it appears to *win* 1.31× — entirely
+dgeev's penalty. **This campaign's ledger said SDC loses 1.27× at n=1024;
+measured, 1.38× at 1024 and 1.54× at 1000. The gap is wider than I believed.**
+Every n=512 result in #36–#40 needs re-reading in this light; whether cuSOLVER's
+`xgeev` has the same power-of-two penalty is NOT established and is not claimed.
+
+**LEVER VERDICTS.**
+
+*Inverse-free SDC (Bai–Demmel–Gu)* — **refuted analytically, unconditionally.**
+One IRS step is 13.33n³ against Newton's 2n³; 15 steps is 200n³, which at
+*perfect gemm efficiency* already exceeds dgeev's entire 93.9 gemm-equivalents.
+No tuning can rescue it. It trades the second-worst-efficiency primitive for
+6.7× more of the worst. But the agent also *confirmed* the classical stability
+claim rather than assuming it: on cond(V)=1e6 the shipped sign iteration
+**stalls and never converges in 80 iterations**, while IRS converges in 29–30
+steps to ‖A21‖/‖A‖ = 1.3e-15. Worth knowing as a fallback, not as a default.
+
+*Halley (Padé[1,1])* — **partially refuted.** Claimed 1.11× at n=1024;
+measured 0.920×/1.010× there, 1.005× at 512, 0.995× at 500. **Neutral on
+Ginibre at every size ≥ 500.** Real where the step count drops most:
+near-symmetric **1.13× at n=512 and 1.11× at n=500**, small-n Ginibre 1.13× at
+256. Traced directly to the stale table.
+
+*Halley with `linsolve="solve"`* — **refuted as shipped, and the crossover
+INVERTS in situ.** In isolation it is correct: 4.47 gemm-equivalents against
+inv's 5.90, comfortably under the threshold, "ship solve". End to end it is a
+**1.4×–2.4× LOSS** with identical iteration counts — because the solve path is
+the one calling scipy, so it pays the BLAS penalty. A per-kernel measurement
+that is right in isolation and wrong in place is the sharpest possible
+illustration of why this campaign measures end to end.
+
+*Thin range-finder* — **noise.** 0.97×–1.05×. The 4.8–8.7% flop saving is real
+on paper and does not convert: it removes full-rate gemms and adds a thin
+`dgeqrf` at 19.7% of gemm rate.
+
+*Implicit `dormqr`* — **refuted outright.** 0.75×–0.97%, two measured causes:
+`dormqr` runs at 19.6–21.8% of gemm rate, below its own break-even, *and* it is
+a scipy call paying the boundary penalty.
+
+*Shift screen + small nudge* — **confirmed neutral, which is what it claimed.**
+Bit-identical iteration counts, never fires on Ginibre or near-symmetric, costs
+nothing measurable, buys tail insurance.
+
+**Seventeenth measurement lesson, and it is the largest of the campaign.**
+Every algorithmic lever here was sized in flops and gemm-equivalents, and the
+dominant cost was **neither** — it was two thread pools from two packaging
+choices contending for four cores. The flop model was internally consistent,
+reproduced the 1.27× loss to three digits, and pointed at the wrong thing
+entirely, because it modelled arithmetic and the bottleneck was *linkage*.
+**Profile before modelling.** I built the cost model in #24 and spent
+seventeen attempts refining levers against it without once checking which
+shared object each call landed in.
+
+184 tests pass.
