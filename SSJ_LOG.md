@@ -2943,3 +2943,74 @@ seventeen attempts refining levers against it without once checking which
 shared object each call landed in.
 
 184 tests pass.
+
+---
+
+### Addendum to #41 — do these levers transfer to C or GPU?
+
+#41 refuted five algorithmic levers on this CPU and found the real win in
+linkage. The obvious follow-up is whether the refutations are *substrate*
+verdicts or *arithmetic* verdicts. They are not the same, and the answer
+differs by target.
+
+**C: no — and the reason is that the C port never had the bug.**
+
+Checked rather than assumed:
+
+```
+$ ldd csrc/sdc_bench | grep -i blas
+  libscipy_openblas64_-32a4b2a6.so  =>  .../numpy.libs/...     (one, only)
+```
+
+Exactly one OpenBLAS, numpy's, by construction since #23 — `csrc` links the
+`scipy_*_64_` symbols out of numpy's shared object and never touches scipy's
+copy. **The C port never had the packaging bug**, which is why it already sat
+at 0.60×–0.73× dgeev while Python sat at 0.34×–0.50×. #41's headline fix has
+nothing to hand it.
+
+Of the five levers only one is structurally applicable to C at all (the others
+were scipy-boundary or Python-overhead effects). `csrc` uses `dgeqp3` for the
+split basis where the fixed Python now uses the randomized range-finder:
+
+| basis | gemm-equivalents |
+|---|---|
+| `dgeqp3` (what `csrc` does) | 11.04 |
+| range-finder = 1 gemm + `dgeqrf` | 9.45 |
+| **saving** | **1.6 of ~127 → 1.3%** |
+
+Negligible, and it trades a deterministic pivot for a randomized one. Not worth
+porting.
+
+Consistency check, which is the useful part: fixed Python is 0.49×–0.54× numpy,
+C is 0.60×–0.73× dgeev. **C retains ~1.3× over fixed Python — exactly the
+"1.3× is pure implementation" figure #23 measured independently on the
+symmetric side.** Two unrelated measurements landing on the same constant is
+the strongest evidence yet that the C port's advantage is call overhead and
+allocation, not anything algorithmic, and therefore that it is *bounded*.
+
+**GPU: yes — specifically the inverse→gemm trades.**
+
+Halley and the higher-order sign iterations died on CPU by arithmetic that is
+entirely substrate-dependent. Halley replaces one inverse per step with extra
+gemms; it wins exactly when `inv/gemm` exceeds ~3.5, and **this box measures
+3.90** — a 4–6% margin, inside noise, which is why it read as "refuted" rather
+than "close". That ratio is a property of the hardware and the library, not of
+the algorithm. On a GPU, gemm runs at or near peak while `getrf`/`getri` are
+panel-bound and latency-exposed, so `inv/gemm` should be *substantially* larger
+— and every gemm-only higher-order member that lost on CPU becomes attractive
+again at the same iteration count.
+
+**The deciding number is cell 1 of `sdc_gpu_colab.ipynb`**, which measures
+gemm / inverse / slogdet / QR in gemm-equivalents on the device. It has been
+written twice and **has not been run**. Until it is, "Halley on GPU" is a
+prediction with a stated threshold (3.5) and no measurement — exactly the shape
+of claim this log exists to stop me from asserting.
+
+**One flag on the existing GPU results, raised by #41's cache finding.**
+
+#41 measured `dgeev` taking an **88% cache-aliasing penalty at exactly n=512**,
+which is why power-of-two comparisons are untrustworthy on this box. #36/#38's
+headline results — SDC beating `cupy.linalg.eig` by 1.39× and 1.13×–1.15× — are
+at **n=256 and n=512, both powers of two**. Whether cuSOLVER's `xgeev` carries
+an analogous stride penalty is unknown. If it does, those wins shrink or vanish;
+the honest re-test is n=250/500 alongside n=256/512, and it has not been done.
