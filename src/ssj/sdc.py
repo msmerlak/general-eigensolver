@@ -56,7 +56,8 @@ import numpy as np
 __all__ = ["sdc_eigvals", "matrix_sign"]
 
 
-def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, count=None):
+def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
+                count=None):
     """Matrix sign function by scaled Newton with a Newton-Schulz endgame.
 
     Returns (S, iters). `count` optionally accumulates a cost model in
@@ -78,6 +79,12 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, count=None):
         whose RMS deviation sits far below the operator norm: at dev < 0.9 a
         symmetric n=400 matrix enters NS outside its convergence region and
         never converges (SSJ_LOG #31).
+    stagnation_tol : accept a stagnated iterate whose dev has fallen below
+        this. `tol` is absolute, but the accuracy the iteration can REACH is
+        set by cond(V) and is 2.5e-09 by cond(V) = 1e3 -- so an absolute 1e-12
+        is unreachable on ordinary non-normal input and the iteration would
+        spin to max_iter and raise on a perfectly usable answer. See the
+        stagnation test in the loop.
     """
     n = A.shape[0]
     eye = np.eye(n)
@@ -117,6 +124,8 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, count=None):
     since_check = 0
     # ns_frob bounds ||I - X^2||_F; the loop carries dev = ||.||_F/sqrt(n).
     ns_switch = ns_frob / np.sqrt(n)
+    # Best dev seen inside the endgame, for the stagnation test below.
+    dev_endgame = np.inf
 
     for it in range(1, max_iter + 1):
         if delta_prev < ns_switch or since_check >= 8:
@@ -128,6 +137,36 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, count=None):
             if dev < tol:
                 return X, it
             if dev < ns_switch:
+                # STAGNATION IS SUCCESS, NOT FAILURE (SSJ_LOG #43). `tol` is
+                # absolute, but the accuracy the iteration can REACH is set by
+                # the conditioning of A's eigenvector basis: the floor measured
+                # on planted spectra runs 6e-13 at cond(V)=1, 1.2e-12 at 1e2,
+                # 2.5e-09 at 1e3 and 4.0e-06 at 1e4. So for cond(V) >~ 100 the
+                # iteration converges in 5-6 steps, sits on its floor, and then
+                # -- before this test existed -- ran out the remaining ~54
+                # iterations and raised. `sdc_eigvals` caught that, tried 12
+                # more shifts that all hit the SAME floor, and fell back to
+                # eigvals: measured 10x SLOWER than simply calling dgeev, for a
+                # bit-identical answer.
+                #
+                # Once NS stops reducing dev by even a factor of 2 the floor is
+                # reached and further steps only burn gemms. Accepting there is
+                # safe because the split's backward-error gate (1e-11 since
+                # #39) is the real quality control and rejects a bad S anyway;
+                # what is NOT safe is accepting a wildly unconverged S, which
+                # is the failure #30 added the raise for. So stagnation is
+                # accepted only once dev is genuinely small; stagnation while
+                # still far out is a real failure and says so immediately
+                # instead of spinning to max_iter.
+                if dev > 0.5 * dev_endgame:
+                    if dev < stagnation_tol:
+                        return X, it
+                    raise np.linalg.LinAlgError(
+                        f"sign iteration stagnated at ||X^2-I||_F/sqrt(n) = "
+                        f"{dev:.2e} after {it} iterations, far from "
+                        f"convergence; the shift is probably too close to an "
+                        f"eigenvalue")
+                dev_endgame = dev
                 # Newton-Schulz: 2 gemms, no factorization, quadratic.
                 X = X @ (1.5 * eye - 0.5 * X2)
                 if count is not None:

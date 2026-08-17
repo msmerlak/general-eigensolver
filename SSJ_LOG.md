@@ -340,6 +340,8 @@ the tail-exclusion path fires.
 | 23 | **Compiled implementation** (C + the same OpenBLAS): `csrc/purify_eigh.c` | **3.3×/4.3×/5.2× dsyevd at n=400/800/1600**, from Python's 4.2/5.3/6.7 — 1.3× is implementation, and the flop deficit is confirmed real. |
 | 24 | **Does the method transfer to non-symmetric A?** (user question) — splitter, split quality, ladder, economics | **architecture yes, splitter no.** Purification is real-line-only; sign replaces it. Split error scales with the oblique ||P||. Incumbent is 7x weaker — the bigger prize. |
 | 25 | **Race SDC-by-sign against dgeev** end to end; leaf sweep | **parity in op counts (88 vs 89 ge), 5.3x loss in wall.** Leaf lesson transfers (4x, shipped as default). The gap is one function: `matrix_sign`. |
+| 43 | **Does SDC have non-speed value?** (user question) — measured, and found a defect while measuring | **`matrix_sign` had no stagnation test: `tol` is absolute but the reachable floor is set by cond(V)** (6e-13 at cond 1, 2.5e-9 at 1e3). On cond(V)≥100 it converged in 5–6 steps, spun 54 more, raised; `sdc_eigvals` then tried 12 more shifts into the same floor and fell back to `eigvals` — **10× slower than just calling dgeev, for a bit-identical answer.** Fixed. Then: **counting is 1.3–1.8× dgeev, partial spectra 1.0–1.3×, and the invariant subspace is 9 ORDERS better than the eigenvector route on a clustered spectrum (3.7e-14 vs 1.2e-02).** |
+| 42 | **The bracketed T4 run** (user ran it) | **the power-of-two worry is CLOSED on the incumbent: `xgeev` is flat** (5.7/5.4/5.2 and 1.9/1.9/1.8 ns/n³ across 250/256/264 and 500/512/520), so #36/#38's wins were real. **Halley confirmed exactly as predicted** — wins Ginibre 1.11×/1.25×/1.12×/1.11× at n=250–512 where Newton loses 0.70× at n=500; back-solved `inv/gemm` = 5.7 at n=512 against the stated 4.9 threshold. Two NEW size traps found: the **host** baseline carries dgeev's n=512 penalty (1.62–1.74×), and **cuBLAS gemm is 1.6–2.5× WORSE at n=1000 than at n=1024** — the mirror image of the CPU. SDC still loses at n≥1000. |
 | 41 | **Full optimize SDC** (user request, 14-agent workflow) | **the biggest win was a PACKAGING bug: numpy and scipy ship separate OpenBLAS pools and fight on 4 cores — 2.0×–6.1× end to end**, accuracy unchanged. My cost table was stale (inverse 5.35→3.90) and mis-sized two levers. **Protocol sizes were powers of two: dgeev takes an 88% cache penalty at n=512**, so SDC's "win" there was an artifact — off the trap it loses 1.35–1.54×. All five levers refuted or noise. |
 | 40 | **Correction** (user supplied the source) | **cuSOLVER DOES have `xgeev`**; `cupy.linalg.eig` → `_geev` → `cusolver.xgeev`, device-resident. My "no geev" claim was stale across #34–#36. **This strengthens #36: the 1.39×/1.13× wins are over a genuine vendor DEVICE kernel.** Also explains xgeev's un-cubic scaling as a young kernel with large fixed cost. |
 | 39 | **Instrument the split accuracy** (user request) | **cause found: an eigenvalue 1.83e-04 from the splitting line at n=1024.** Moving the shift fixes it 25–250×. The retry machinery already existed; the gate was **1e-6, with 25892× to 17-MILLION× headroom — it had never fired.** Shipped `gate=1e-11`: 99× better accuracy at n=1024, 2.5× sign cost there only, nothing changes at n≤512. |
@@ -3014,3 +3016,206 @@ headline results — SDC beating `cupy.linalg.eig` by 1.39× and 1.13×–1.15×
 at **n=256 and n=512, both powers of two**. Whether cuSOLVER's `xgeev` carries
 an analogous stride penalty is unknown. If it does, those wins shrink or vanish;
 the honest re-test is n=250/500 alongside n=256/512, and it has not been done.
+
+---
+
+## #42 — the bracketed T4 run: the power-of-two worry is closed, and Halley transfers
+
+The user ran the revised notebook on a T4. Three things settle, and two new size
+traps appear that nobody was looking for.
+
+**1. `xgeev` HAS NO POWER-OF-TWO PENALTY. The worry is closed.**
+
+```
+     n   xgeev ms   ns/n^3
+   250       88.7      5.7
+   256       91.1      5.4     <- no spike
+   264       96.3      5.2
+   500      235.5      1.9
+   512      259.5      1.9     <- no spike
+   520      255.3      1.8
+  1000      762.0      0.8
+  1024      792.9      0.7
+```
+
+Monotone through both brackets. So the flag raised in #41's addendum — that
+#36/#38's headline wins sat at n=256 and n=512, both powers of two, and might
+be artefacts of the *incumbent's* cache behaviour the way the CPU's were — is
+**resolved in SDC's favour. Those wins were real.** This is the first time in
+the campaign that a "your protocol flattered you" worry checked out clean, and
+it is worth noting that it cost eight lines of measurement to close a doubt
+that would otherwise have hung over every GPU number in the log.
+
+**2. HALLEY TRANSFERRED, AND THE THRESHOLD MODEL PREDICTED IT.**
+
+Ginibre, `vs incumbent`:
+
+```
+     n      Newton    Halley
+   250       1.05x     1.11x
+   256       1.10x     1.25x
+   500       0.70x     1.12x     <- Newton LOSES here, Halley wins
+   512       1.08x     1.11x
+  1000       0.80x     0.74x
+  1024       0.43x     0.67x
+```
+
+The model said Halley wins when `inv/gemm > 3ρ/(1−ρ)`, ρ = 0.62 on Ginibre, so
+threshold 4.9; CPU measures 3.90 and Halley was neutral there. Back-solving the
+T4 numbers from the paired step counts at n=512 (Newton 13 far-field steps at
+237.5 ms, Halley 8 at 231.2 ms, gemm 1.41 ms):
+
+```
+  L + 13 I = 237.5        L + 8 I + 24 g = 231.2
+  -> 5 I = 40.1  ->  I = 8.02 ms  ->  inv/gemm = 5.7   (threshold 4.9)
+```
+
+and at n=256 the same algebra gives **12.1**. Both above threshold, and Halley
+wins at both. **A prediction with a number attached, made before the run, and
+confirmed by a second independent route through the same data.** That is the
+first time in this log a performance claim has been stated as a threshold in
+advance and then landed.
+
+**3. TWO NEW SIZE TRAPS, both the opposite of what #41 found.**
+
+*The host baseline carries the CPU penalty.* Host round trip at n=500 is 305.0
+ms and at n=512 is 492.7 (1.62×); near-symmetric 207.5 → 360.1 (1.74×). #41's
+dgeev cache penalty is alive on this box too — it simply does not touch the
+device incumbent. It **does** contaminate the leaf-crossover table, where the
+n=512 row shows "device wins 2×" (host 486.1 vs device 247.9) while the honest
+n=500 row is a tie (271.9 vs 277.9). **The crossover is ~500, and the n=512
+row overstates the device by the CPU's own artefact.** `LEAF_DEVICE_MIN = 450`
+survives, but for a different reason than the one recorded in #38.
+
+*cuBLAS gemm is WORSE at n=1000 than at n=1024*, by 1.6–2.5× per unit work
+(28.25 and 26.18 ms at n=1000 against 16.64 and 10.66 at n=1024, on a larger
+matrix). The CPU penalises the power of two; the GPU rewards it. **Any
+protocol that brackets powers of two to be safe on one substrate is
+mis-bracketed on the other**, and the only defensible rule is to measure the
+kernel's size sensitivity on the machine in front of you — which is what cell 1
+now does and what nobody had done for cuBLAS.
+
+**4. An unplanned interaction: `ns_order=5` rescued a rejected split.** At
+n=500 near-symmetric, Halley with the order-3 endgame took 20 far-field and 11
+NS steps across **2 splits** (440 ms) — the first split failed the 1e-11 gate
+and retried. With the order-5 endgame: 9/2, **1 split**, 218 ms. **2.0× from
+changing only the endgame polynomial.** The higher-order endgame reaches a
+cleaner sign matrix, which passes the gate first time. Not predicted, not
+sought, and it means the endgame order is not the 5%-scale knob the work-per-
+digit arithmetic said it was — it can change *how many splits happen*.
+
+**Standing after this run.** SDC beats `cupy.linalg.eig` at **n = 250, 256, 500
+and 512** — off the powers of two as well as on — by 1.04×–1.25×, and loses at
+n ≥ 1000 by 0.66×–0.80×. `far=halley, ns_order=5` is the configuration to use
+below 512. `leaf=deep` remains 7–9× slower and is still a control.
+
+---
+
+## #43 — does SDC have value that is not speed? And a defect found while asking
+
+The user asked what SDC is worth if it does not beat cuSOLVER. Answering it
+honestly required non-normal test matrices, and the first one broke the solver.
+
+**THE DEFECT: `tol` IS ABSOLUTE, BUT THE REACHABLE ACCURACY IS NOT.**
+
+`matrix_sign` tested `dev < tol` with `tol = 1e-12` and raised `LinAlgError`
+after `max_iter`. But the accuracy the sign iteration can *reach* is set by the
+conditioning of A's eigenvector basis. Measured on planted spectra:
+
+```
+  cond(V)     dev floor    floor/eps    count at floor
+      1e0       6.0e-13        2.7e3      correct
+      1e1       8.0e-15        3.6e1      correct
+      1e2       1.2e-12        5.4e3      correct
+      1e3       2.5e-09        1.2e7      correct
+      1e4       4.0e-06        1.8e10     correct
+```
+
+So for cond(V) ≳ 100 the floor sits **above** `tol` and the test can never pass.
+Traced on an n=100 case: the iteration converges beautifully — dev
+9.9e-01 → 1.9e0 → 1.0e-01 → 7.8e-04 → 2.6e-07 → **1.3e-12 at iteration 6** —
+and then sits at 1.3e-12 for **fifty-four more iterations** before raising. And
+`sdc_eigvals` catches that, tries **twelve more shifts that all hit the same
+floor**, and falls back to `eigvals`.
+
+End to end, on planted spectra:
+
+```
+     n   cond(V)   sdc ms   dgeev ms   ratio   dlam
+   200      1e+3    123.0       12.4   0.10x   0.0e+00   <- bit-identical
+   400      1e+3    607.9       52.9   0.09x   0.0e+00   <- to numpy's answer
+```
+
+**`dlam` of exactly 0.0 is the signature of a total fallback.** SDC was doing
+720 wasted sign iterations to return LAPACK's answer at **10× LAPACK's cost**,
+on ordinary moderately non-normal input, and nothing in the campaign had
+noticed because every test matrix was Ginibre, symmetric, or planted with an
+orthogonal eigenbasis.
+
+**THE FIX.** Accept stagnation as convergence: once the Newton–Schulz endgame
+stops reducing `dev` by even a factor of 2, the floor is reached and further
+steps only burn gemms. Guarded by `stagnation_tol=1e-6` so that stagnating
+*far* from convergence — the failure #30 added the raise for — still raises, and
+now raises **immediately** with a diagnostic instead of spinning to `max_iter`.
+This is safe because the split's own backward-error gate (1e-11 since #39) is
+the real quality control and rejects a bad S regardless. 184 tests pass.
+
+**Eighteenth measurement lesson.** An absolute tolerance on an iterate is a
+claim about attainable accuracy, and attainable accuracy is a property of the
+*problem*, not of the algorithm. The number 1e-12 had been in this file since
+#24 and was never wrong on any matrix the campaign tested — because the
+campaign only tested matrices where it happened to be reachable. **A constant
+that is only ever exercised inside its valid range looks like a constant, not
+like an assumption.**
+
+**NOW THE ACTUAL QUESTION.** With the solver working on non-normal input:
+
+*1. Counting, without forming a single eigenvalue.* `r = round(trace((I+S)/2))`
+is the number of eigenvalues right of the line. One sign iteration, no
+eigendecomposition:
+
+```
+                       true k   sdc k   sign ms   dgeev ms   speedup
+   planted cond=1e2       180     180     100.1      180.5     1.80x
+   ginibre                304     304     230.4      305.3     1.32x
+```
+
+And from the floor table above: **the count is correct at every conditioning
+tested, including cond(V)=1e4 where the sign matrix itself is only good to
+4e-06.** The rank is an integer — it needs the trace within 0.5, not within
+1e-12 — so it survives four orders of accuracy loss that would destroy the
+eigenvalues. This is the most robust thing SDC computes, and `dgeev` has no way
+to answer the question without computing the whole spectrum first.
+
+*2. Partial spectra.* Eigenvalues in a half-plane = one split, one block solved:
+**1.29× dgeev on planted, 1.00× on Ginibre.** Modest, and the reason is
+structural: one split costs about what it saves, so the win is roughly the leaf
+asymmetry. Real but small.
+
+*3. Invariant subspaces — and here the answer is a factor of 10^10.* The
+comparison is against building the same subspace from `dgeev`'s eigenvectors.
+On well-separated spectra the eigenvector route is *better* (3e-16 against
+SDC's 1e-12). But on a **clustered** spectrum — both halves collapsed into
+1e-9-wide clusters, where individual eigenvectors are ill-conditioned but the
+invariant subspace is not:
+
+```
+   spectrum    cond(V)   resid sdc   resid eig
+   separated      1e+01    1.14e-12    1.37e-15     eig
+   separated      1e+03    2.13e-13    3.14e-16     eig
+   CLUSTERED      1e+01    3.59e-14    1.26e-15     eig
+   CLUSTERED      1e+03    3.66e-14    1.20e-02     <- SDC, by 9 orders
+```
+
+`resid = ‖AQ − Q(QᵀAQ)‖₂/‖A‖₂`. The eigenvector route **fails outright** —
+1.2e-02 is no invariant subspace at all — while SDC is unmoved at 3.7e-14,
+because its Q comes from an orthogonal similarity and never touches the
+ill-conditioned eigenbasis. **This is SDC's real claim, and it is not a speed
+claim.** It is also the only result in this log where the margin is measured in
+orders of magnitude rather than percent.
+
+**What this does NOT establish.** SDC's advantage on separated spectra is
+nothing (it loses 3 orders on residual there). The partial-spectrum win is
+1.0–1.3×, inside the range where implementation noise lives. And every number
+here is single-threaded CPU Python; the C port and the GPU port were not
+re-measured for these three capabilities.
