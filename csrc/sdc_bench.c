@@ -2,10 +2,10 @@
  *
  * Both sides run through the SAME binary and the SAME OpenBLAS, so the
  * comparison isolates the algorithm and its implementation rather than the
- * BLAS (SSJ_LOG #13's cross-library confound).
+ * BLAS (OPTIMIZATION_LOG #13's cross-library confound).
  *
  * Every timed configuration is accuracy-checked BEFORE it is timed: a routine
- * that fails fast looks fast (SSJ_LOG #5/#7).
+ * that fails fast looks fast (OPTIMIZATION_LOG #5/#7).
  */
 #include <math.h>
 #include <stdint.h>

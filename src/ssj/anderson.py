@@ -1,6 +1,6 @@
 """Anderson-accelerated IPT.
 
-RESULTS.md records Anderson acceleration DIVERGING on SSJ, and this repository
+RESULTS_JULIA.md records Anderson acceleration DIVERGING on SSJ, and this repository
 independently confirmed that generator-space momentum fails there too. Both
 findings are about SSJ, whose stability comes from a saturation that
 extrapolation bypasses -- "every variant that is more faithful to the true

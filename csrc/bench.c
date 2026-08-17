@@ -2,10 +2,10 @@
  *
  * Both solvers run through the SAME binary and the SAME OpenBLAS, so the
  * comparison isolates the algorithm and its implementation, not the BLAS
- * (SSJ_LOG #13's cross-library confound).
+ * (OPTIMIZATION_LOG #13's cross-library confound).
  *
  * Every timed configuration is accuracy-checked BEFORE it is timed: a
- * routine that fails fast looks fast (SSJ_LOG #5/#7).
+ * routine that fails fast looks fast (OPTIMIZATION_LOG #5/#7).
  */
 #include <math.h>
 #include <stdint.h>
@@ -188,7 +188,7 @@ int main(int argc, char **argv) {
         double dl, res, orth;
         metrics(A, n, w, V, wref, &dl, &res, &orth);
         /* c==3 is the 1e-9 cluster: the fp32 split route has a documented
-         * intra-cluster residual floor (SSJ_LOG #19), so it carries the
+         * intra-cluster residual floor (OPTIMIZATION_LOG #19), so it carries the
          * documented bar rather than a tighter one that would "fail" a
          * behaviour the log already establishes and pins in the Python suite */
         double bar_dl = (c == 3) ? 1e-9 : 1e-11;

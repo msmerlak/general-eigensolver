@@ -1,8 +1,11 @@
-# SSJ improvement log
+# Optimization log
 
 A dedicated track, separate from `MAP_LEDGER.md`. That ledger hunts for *new
-maps*; this one improves the map the repository already ships. **Append here
-before anything else**, one line per attempt, negative results included.
+maps*; this one improves the maps the repository already ships — SSJ first
+(#1–15), then extending to purification, IPT refinement, SDC (CPU, C, and
+GPU), and the packaging/substrate issues found along the way (#16–43).
+**Append here before anything else**, one line per attempt, negative results
+included.
 
 ## What this is teaching us about the eigenvalue problem
 
@@ -248,7 +251,7 @@ found load-bearing:
 |---|---|
 | over-relaxation γ·K, γ > 1 | slows or diverges for **every** γ tried |
 | generator-space momentum | slows for every β tried (the saturation is what it breaks) |
-| Anderson acceleration | diverges (RESULTS.md, independently reproduced) |
+| Anderson acceleration | diverges (RESULTS_JULIA.md, independently reproduced) |
 | second-order retraction | no gain |
 | deferred orthonormalization | **actively harmful** (#15, re-measured at 8-sweep economics): every skip rule costs sweeps, and it can terminate "converged" with 1e-7 eigenvalue error — off(B) in a skewed frame certifies nothing |
 | CholeskyQR2 retraction | slower than QR on this CPU BLAS (18.4 gemm-equiv vs 9.2 at n=800) |

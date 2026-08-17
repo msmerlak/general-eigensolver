@@ -6,12 +6,12 @@ accuracies are stable). Every run starts cold from $X_0 = I$ with tolerance
 $10^{-13}$ on $\|\mathrm{offdiag}(X^\top A X)\|_F / \|A\|_2$, where $\|A\|_2$
 is a power-iteration estimate (see "Refinements" below). Battery and scaling
 rows reproduce with `python3 validate.py --full`; mechanism experiments with
-`python3 experiments.py`. Error columns as in [RESULTS.md](RESULTS.md):
+`python3 experiments.py`. Error columns as in [RESULTS_JULIA.md](RESULTS_JULIA.md):
 $d\lambda$ = max eigenvalue error vs LAPACK, resid =
 $\|AV - V\Lambda\|_F/\|A\|_2$, ortho = $\|V^\top V - I\|_F$.
 
 The reference measurements from the original Julia implementation are in
-[RESULTS.md](RESULTS.md); rows here use the same matrix families (independent
+[RESULTS_JULIA.md](RESULTS_JULIA.md); rows here use the same matrix families (independent
 random constructions, so seeds differ).
 
 ## Convergence battery
@@ -336,7 +336,7 @@ memorylessness is exactly what makes the float32 phase safe.)
 Reproduce with `python3 experiments_accel.py` (sweep counts, deterministic)
 and the timing snippets in the tables above.
 
-## GPU (arithmetic and a runnable benchmark, no measurement)
+## GPU
 
 The implementation is backend-agnostic: pass a CuPy array and every operation
 — angles, retractions, power iterations — runs on the device.
@@ -344,48 +344,47 @@ The implementation is backend-agnostic: pass a CuPy array and every operation
 (the incumbent, in gemm-equivalents), SSJ cold (`gemm` and `cholqr2`
 methods), and the warm-start tracking case against a cuSOLVER re-solve.
 
-What the measured gemm counts predict, against the 50–200 gemm-equivalent
-range RESULTS.md cites for accelerator eigensolves (dense symmetric
-eigensolvers on GPUs are factorization- and memory-bound; the published
-cuSOLVER/MAGMA ratios at $N\gtrsim8$k sit broadly in that range, growing
-with $N$):
+**Measured on a Tesla T4** (full account: `OPTIMIZATION_LOG.md` #33), the founding
+premise — that `syevd`'s cost in gemm-equivalents rises on GPU, opening room
+for an all-gemm method — **does not hold**: cuSOLVER is *more* gemm-efficient
+on this card than on CPU, and its efficiency rises further with $N$
+(15.3 / 6.9 / 5.4 gemm-equivalents at $N=$ 512 / 1024 / 2048, all below the
+50–200 range RESULTS_JULIA.md's prediction assumed). The result is card-specific —
+a T4's low FP64 rate deflates every gemm-equivalent count, cuSOLVER's own
+included, so the same solve on an A100 would price out differently — but the
+predictions below, kept for the record, did not survive contact with real
+hardware:
 
-- **Cold start: likely still loses in pure FP64, but `precision="mixed"`
-  changes the arithmetic.** ~10 raw gemms per sweep × sweeps growing like
-  $\log N$ gives ≈ 450–500 FP64 gemms at $N=10$k — above the range unless
-  `syevd` on the target GPU lands at the very top of it. In mixed mode,
-  however, ~90% of those gemms run in float32/TF32 at 8–16× FP64
-  tensor-core throughput: the measured split (~25 FP64 + ~255 float32 gemms
-  at $N=1000$) prices out at ≈ 50–60 FP64-gemm-equivalents — inside the
-  range. Mixed-precision cold start on tensor cores is the one configuration
-  where SSJ could beat cuSOLVER from cold; bench_gpu.py measures it.
-- **Warm-start tracking: the credible win.** 1–5 sweeps ≈ 10–30 raw gemms
-  per update is 2–10× under the range, FP64 end to end, with no
-  factorization in the loop.
-- **CholeskyQR2 should reverse its CPU verdict** on GPU (its triangular
-  kernels are small next to its gemms there), making it the retraction to
-  try first for the cold-start case.
-- **Mixed precision is implemented** (`precision="mixed"`, see
-  "Accelerations explored") and validated on CPU at full final accuracy;
-  bench_gpu.py includes the mixed cold-start row. FP16 and TF32 variants of
-  the low phase remain untested.
+- ~~Cold start likely still loses in pure FP64, but mixed precision changes
+  the arithmetic.~~ Measured: even mixed precision's ~50–60 FP64-gemm-equivalent
+  estimate is now comfortably inside cuSOLVER's measured 5.4–15.3, not the
+  50–200 range it was sized against.
+- ~~Warm-start tracking is the credible win.~~ Not measured on GPU; the CPU
+  case for it is unaffected, but the gemm-equivalent budget it was compared
+  against was too generous by 3–20×.
+- **CholeskyQR2 reversing its CPU verdict** is untested here — `bench_gpu.py`'s
+  T4 run used `gemm` only.
 
-These are predictions from measured gemm counts plus published GPU ratios,
-not measurements; `bench_gpu.py` exists to replace them with numbers.
+SDC (nonsymmetric, dense) fares differently: measured against
+`cupy.linalg.eig`, it wins 1.04–1.25× at $N \le 512$ and loses 0.66–0.80× at
+$N \ge 1000$ (`OPTIMIZATION_LOG.md` #36, #42) — the ratios that make it lose on CPU
+(BENCHMARKS.md above; see also GENERAL.md) do partly invert on GPU, unlike
+SSJ's. `far=halley, ns_order=5` is the configuration measured to win below
+512.
 
 ## Honest wall-clock context
 
 LAPACK `eigh` (dsyevd) solves the GOE $N=1000$ problem in 0.07 s on this box
 against `auto`'s 3.4 s — a $\sim$50× gap from a cold start (the reference
 measured $\sim$21× in Julia; ours is wider, consistent with this build's very
-fast dsyevd). The niches are unchanged from RESULTS.md: hardware where an
+fast dsyevd). The niches are unchanged from RESULTS_JULIA.md: hardware where an
 eigensolve costs 50–200 gemm-equivalents, and robustness — a three-line,
 parameter-free method with an empirically global basin, native degeneracy
 handling, and (new here) identical behavior on complex Hermitian input.
 
 ## Not established
 
-Everything in RESULTS.md's "Not established" section still stands: no
+Everything in RESULTS_JULIA.md's "Not established" section still stands: no
 convergence proof, novelty vs the parallel-Jacobi literature unverified,
 symmetric/Hermitian only. Added by this work: the Toeplitz and graded sweep
 counts differ from the reference in both directions for reasons not yet

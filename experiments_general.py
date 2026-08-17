@@ -2,7 +2,7 @@
 
 Experiment 1 -- saturated IPT. IPT's denominator (Lambda_j - d_i) is the
 *linearized* gap, the direct analogue of the linearized Jacobi angle
-B_ij/(d_j - d_i) that RESULTS.md records diverging at ~0.85x the level
+B_ij/(d_j - d_i) that RESULTS_JULIA.md records diverging at ~0.85x the level
 spacing. SSJ's fix was to replace it with the exact 2x2 solve, which
 saturates. The same fix exists here: for the 2x2 block
 
@@ -17,7 +17,7 @@ which reduces to (d_j - d_i) when p = 0 and tends to sqrt(p) as the gap
 closes -- bounding v_i by sqrt(W_ij/W_ji) instead of letting it blow up.
 Structurally identical to Jacobi's t = sign(tau)/(|tau| + sqrt(1+tau^2)).
 
-Experiment 2 -- can orthogonal SSJ reach real Schur form? RESULTS.md reports
+Experiment 2 -- can orthogonal SSJ reach real Schur form? RESULTS_JULIA.md reports
 this direction failing because off^2 is not a Lyapunov function there. Tested
 here with the exact 2x2 triangularizing angle rather than a linearized one.
 

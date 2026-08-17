@@ -5,7 +5,7 @@
 #include <stdint.h>
 
 /* Wall-clock and iteration counters, so the phase split is attributed rather
- * than inferred. Accumulated across a whole solve (SSJ_LOG #25: a per-call
+ * than inferred. Accumulated across a whole solve (OPTIMIZATION_LOG #25: a per-call
  * single-shot decomposition measured the harness, not the algorithm). */
 typedef struct {
     double t_sign;      /* total time inside matrix_sign                    */
@@ -32,9 +32,9 @@ typedef struct {
  * divide and conquer. wr/wi receive the real and imaginary parts, unsorted.
  * min_block <= 0 selects the measured default 3n/5 -- one split, both halves
  * to dgeev. Two measured constraints, not one: recursing to 2x2 is 4x slower
- * and no more accurate (SSJ_LOG #25), and a leaf of exactly n/2 costs a
+ * and no more accurate (OPTIMIZATION_LOG #25), and a leaf of exactly n/2 costs a
  * SECOND sign iteration because the centred split returns r near but not on
- * n/2 (SSJ_LOG #28, worth 1.10x-1.16x). `st` may be NULL. */
+ * n/2 (OPTIMIZATION_LOG #28, worth 1.10x-1.16x). `st` may be NULL. */
 void sdc_eigvals_c(const double *A, int64_t n, double *wr, double *wi,
                    int64_t min_block, sdc_stats *st);
 
@@ -50,10 +50,10 @@ int matrix_sign_bench(const double *A, int64_t n, double shift, sdc_stats *st);
  *
  * This is a bound on the un-normalized Frobenius norm, i.e. dev < 1/sqrt(n)
  * in the loop's normalized units -- a scaling law, not a constant. A fixed
- * threshold on dev tests the wrong norm: at dev < 0.9 (SSJ_LOG #29, swept on
+ * threshold on dev tests the wrong norm: at dev < 0.9 (OPTIMIZATION_LOG #29, swept on
  * Ginibre alone) a symmetric matrix enters NS outside its convergence region
  * and never converges, costing 2712 ms against dgeev's 48 ms at n=400 and
- * 13448 ms at n=800 (SSJ_LOG #31). Exposed for sweeping, not for tuning. */
+ * 13448 ms at n=800 (OPTIMIZATION_LOG #31). Exposed for sweeping, not for tuning. */
 void sdc_set_ns_switch(double v);
 double sdc_get_ns_switch(void);
 

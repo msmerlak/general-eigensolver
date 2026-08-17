@@ -1,5 +1,5 @@
 """Mechanism experiments: convergence trajectory, monotonicity, and controlled
-confirmations of the negative results in RESULTS.md (each variant below removes
+confirmations of the negative results in RESULTS_JULIA.md (each variant below removes
 one of the two saturations and is predicted to diverge).
 
 Run: python3 experiments.py

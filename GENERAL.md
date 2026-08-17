@@ -46,7 +46,7 @@ coupling is made.
 ## Failure 1: saturating IPT does not widen its basin
 
 IPT's denominator $(\Lambda_j - d_i)$ is the *linearized* gap — the exact
-analogue of the linearized Jacobi angle $B_{ij}/(d_j-d_i)$ that RESULTS.md
+analogue of the linearized Jacobi angle $B_{ij}/(d_j-d_i)$ that RESULTS_JULIA.md
 records diverging at $0.85\times$ the level spacing. SSJ's fix was the exact
 2×2 solve. That fix exists here too: for the block
 $\left[\begin{smallmatrix} d_i & W_{ij} \\ W_{ji} & d_j\end{smallmatrix}\right]$
@@ -70,7 +70,7 @@ Measured, $N=300$:
 **The saturation changes nothing inside the basin and does not extend it.** It
 only bounds the damage outside (divergence four orders of magnitude gentler).
 
-This sharpens RESULTS.md's mechanism claim rather than contradicting it. SSJ is
+This sharpens RESULTS_JULIA.md's mechanism claim rather than contradicting it. SSJ is
 stable because it *linearizes then reprojects* — two saturations. The arctan
 bounds each pair angle; the reprojection of $I+K$ onto $O(N)$ saturates the
 *composed* step. In $GL(N)$ there is no manifold to reproject onto, so only the
@@ -79,7 +79,7 @@ The experiment is a direct test of that claim, and it passes.
 
 ## Failure 2: orthogonal SSJ cannot reach real Schur form
 
-RESULTS.md reports this and it reproduces independently here, using the exact
+RESULTS_JULIA.md reports this and it reproduces independently here, using the exact
 2×2 triangularizing angle (not a linearized one). $\|\mathrm{tril}(B,-1)\|_F/\|A\|_2$:
 
 - general near-diagonal, $\rho = 0.1$: starts at **0.018** and grows
@@ -339,8 +339,12 @@ on accelerators and distributed machines: gemm-dominated hardware makes the
 inverse and QR comparatively cheap and gemm-rich, while `dgeev`'s sequential
 QR iteration is notoriously poor there. That is why this algorithm family
 exists in the literature at all — it was designed for parallel machines, not
-for single-socket LAPACK. `bench_gpu.py`-style measurement on a GPU is the
-test that would settle it, and is not available here.
+for single-socket LAPACK. Measured on a Tesla T4 (`OPTIMIZATION_LOG.md` #36, #42): SDC
+beats `cupy.linalg.eig` 1.04–1.25× at n = 250, 256, 500, 512, and loses
+0.66–0.80× at n ≥ 1000 — the ratios do invert on GPU, but the crossover sits
+lower than the CPU cost model alone would suggest. (SSJ's own all-gemm thesis
+does *not* transfer to GPU — see OPTIMIZATION_LOG.md #33 — so the inversion is
+specific to SDC's inverse/QR-heavy structure, not general to this repository.)
 
 ## Final map
 
@@ -349,7 +353,7 @@ test that would settle it, and is not available here.
 | symmetric / Hermitian | SSJ, IPT, hybrid | solved; IPT beats `dsyevd` 1.4–1.9× near-diagonal |
 | normal | `normal_eig` | solved exactly; 1.3–1.9× over `dgeev`, unitary output |
 | general, near-diagonal ($\rho \lesssim 0.1$) | `ipt_eig` | solved; **4–12× over `dgeev`** |
-| **general, non-normal, far from diagonal** | `sdc_eigvals` | **solved** (1e-13), but 0.13–0.22× of `dgeev` on CPU |
+| **general, non-normal, far from diagonal** | `sdc_eigvals` | **solved** (1e-13); 0.13–0.22× of `dgeev` on CPU, but **1.04–1.25× over `cupy.linalg.eig` on GPU** at n ≤ 512 (OPTIMIZATION_LOG.md #36, #42) |
 
 Nothing in this repository is now *unsolved*. What remains is a performance
 gap with a stated break-even condition, on hardware where the constants are
@@ -801,7 +805,7 @@ the global basin plus the all-gemm diet is exactly what is wanted.
 
 ## Anderson acceleration on IPT: no
 
-RESULTS.md records Anderson diverging on SSJ, and momentum failing there too —
+RESULTS_JULIA.md records Anderson diverging on SSJ, and momentum failing there too —
 but both findings concern SSJ, whose stability *comes from* a saturation that
 extrapolation bypasses. IPT has no such mechanism to break: it is a plain
 fixed-point iteration with linear rate, which is what Anderson/DIIS was built
@@ -1290,7 +1294,7 @@ $$\text{SSJ: } K_{ij} \sim \frac{A_{ij}}{d_j - d_i} \qquad\qquad \text{Brockett:
 **divide by the gap, or multiply by a weight.** Both cost $O(n^2)$
 elementwise, both use the same retraction, both are isospectral. And the
 gradient version has what SSJ conspicuously lacks — Brockett (1991) proves it
-converges to a diagonal matrix for generic $N$, where RESULTS.md says plainly
+converges to a diagonal matrix for generic $N$, where RESULTS_JULIA.md says plainly
 that no convergence proof is known for SSJ. It also has no denominators, so
 exact degeneracy is not a special case, and it needs no near-diagonality
 because $N$ is *chosen* rather than read off $A$.

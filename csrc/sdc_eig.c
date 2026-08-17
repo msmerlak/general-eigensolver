@@ -1,7 +1,7 @@
 /* Spectral divide and conquer in C: matrix sign function + one orthogonal
  * split, leaves to dgeev.
  *
- * A compiled port of ssj.sdc (SSJ_LOG #24-25), written to settle one
+ * A compiled port of ssj.sdc (OPTIMIZATION_LOG #24-25), written to settle one
  * specific contradiction. The Python SDC has *operation-count parity* with
  * dgeev on Ginibre n=400 -- 88 gemm-equivalents counted against dgeev's 89 --
  * and still loses 7.7-14x at the wall, with the entire discrepancy localized
@@ -95,7 +95,7 @@ static double *xmalloc_d(size_t k) {
  * threshold on dev is testing the wrong norm, and how wrong depends on the
  * spectrum.
  *
- * That is not hypothetical: at dev < 0.9 (SSJ_LOG #29, measured on Ginibre
+ * That is not hypothetical: at dev < 0.9 (OPTIMIZATION_LOG #29, measured on Ginibre
  * alone) a SYMMETRIC matrix enters NS outside its convergence region, never
  * converges, and burns all twelve shift retries before falling back --
  * 2712 ms against dgeev's 48 ms at n=400, and 13448 ms at n=800. Ginibre
@@ -243,7 +243,7 @@ static int matrix_sign_c(double *X, bi n, double tol, double ns_switch,
     const double ns_thresh = ns_switch / sqn;
 
     /* THE FAR-FIELD GEMM IS OPTIONAL, and skipping it is the whole point here
-     * (SSJ_LOG #30). A far-field Newton step costs X^2 (2n^3) + dgetrf
+     * (OPTIMIZATION_LOG #30). A far-field Newton step costs X^2 (2n^3) + dgetrf
      * (2n^3/3) + dgetri (4n^3/3) = 4n^3, and HALF of that is a gemm whose only
      * job is to evaluate ||X^2 - I||. But Newton already builds the update,
      *
@@ -366,7 +366,7 @@ static bi split_once(const double *A, bi n, double shift, double tol,
 
     /* Orthonormal basis for range(P) by pivoted QR: the r independent columns
      * come first, so the leading r columns of Q span the invariant subspace.
-     * (SSJ_LOG #24: building the basis from QR of [P, I-P] instead is WRONG --
+     * (OPTIMIZATION_LOG #24: building the basis from QR of [P, I-P] instead is WRONG --
      * the column reordering destroys the range separation.) */
     t0 = now_s();
     memcpy(ws->q, ws->cur, nn * sizeof(double));

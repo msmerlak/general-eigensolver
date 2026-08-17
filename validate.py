@@ -1,4 +1,4 @@
-"""Reproduce the convergence battery and scaling experiments from RESULTS.md.
+"""Reproduce the convergence battery and scaling experiments from RESULTS_JULIA.md.
 
 Run: python3 validate.py            (battery + scaling, ~1 min)
      python3 validate.py --full     (also N=1600 scaling row and timing runs)

@@ -1,7 +1,7 @@
 # Map ledger — CLOSED
 
 **The map hunt is closed at 34 entries.** This file is now a read-only record;
-the active work is in `SSJ_LOG.md`. Kept because the negative results are the
+the active work is in `OPTIMIZATION_LOG.md`. Kept because the negative results are the
 point: they cost real measurement and they make future work cheap.
 
 ## Why it was closed
@@ -29,14 +29,18 @@ predictable.
 
 ## What remains open, for anyone picking this up
 
-* **GPU validation of SSJ.** The whole premise — every flop a gemm — targets
-  hardware where factorizations are disproportionately expensive. Every verdict
-  here is CPU-measured, on precisely the hardware SSJ was not designed for.
-  `bench_gpu.py` has never had a GPU to run on. That one measurement either
-  validates or retires the method's reason for existing.
+* **GPU validation of SSJ — measured, and it retired the thesis on this card.**
+  `bench_gpu.py` ran on a Tesla T4 (`OPTIMIZATION_LOG.md` #33): cuSOLVER's `syevd` is
+  *more* gemm-efficient on GPU than on CPU, not less, closing the room the
+  all-gemm premise needed. The verdict is card-specific (a T4's fp64 rate is
+  unusually low, deflating every gemm-equivalent count including cuSOLVER's
+  own — see #33's caveat), so an A100 re-run is still open, but the framing
+  that no GPU measurement existed no longer holds. SDC's GPU story is
+  different and better: a narrow, verified win over `cupy.linalg.eig` at
+  n ≤ 512 (#36, #42).
 * **A convergence proof for SSJ's linear phase**, now more tractable: descent
   held on every seed ever run, and the ≈½·log n diagonal-spread mechanism is
-  quantified in `SSJ_LOG.md`.
+  quantified in `OPTIMIZATION_LOG.md`.
 * **A fast Cauchy apply (FMM) for the secular map (#28)** — the only basin-free
   exact method here, O(n²) but losing on constants with crossover near n≈5000.
   Known technology, known endpoint.

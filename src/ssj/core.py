@@ -481,7 +481,7 @@ def ssj_eigh(
 
     n = A.shape[0]
     # block_m may be an int or a per-sweep schedule (a sequence; its last
-    # entry repeats). The anatomy of the pre-cliff phase (SSJ_LOG attempt #9)
+    # entry repeats). The anatomy of the pre-cliff phase (OPTIMIZATION_LOG attempt #9)
     # is why a schedule exists: early sweeps are bottlenecked on diagonal
     # SPREAD, which big blocks inject at ~sqrt(m) per pass, while late sweeps
     # only need adjacent pairs decoupled, which small blocks do at a fraction

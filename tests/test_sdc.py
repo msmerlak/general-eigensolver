@@ -108,7 +108,7 @@ if __name__ == "__main__":
 
 def test_sdc_leaf_default_is_one_split():
     """The leaf default is max(2, n//2) -- one split, both halves to dgeev.
-    Recursing to 2x2 measured 4x slower with no accuracy gain (SSJ_LOG #25),
+    Recursing to 2x2 measured 4x slower with no accuracy gain (OPTIMIZATION_LOG #25),
     the same lesson the symmetric solver learned in #17. Pin the default and
     the accuracy so a future 'deeper must be better' change has to face it."""
     import numpy as np

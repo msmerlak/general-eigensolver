@@ -1,11 +1,17 @@
 # general-eigensolver
 
-A Python/NumPy implementation of **Simultaneous Saturated Jacobi (SSJ)**: full
-symmetric / Hermitian eigendecomposition by applying *every* classical Jacobi
-rotation angle at once through a single linearized step, followed by
-reprojection onto the orthogonal manifold. Parameter-free — no pivoting, no
-shifts, no deflation or degeneracy-detection logic; matrix multiplication and
-an elementwise arctangent are the whole map.
+An exploration of eigensolver ideas in Python/NumPy: which fixed points,
+iterations, and reductions can beat LAPACK/ARPACK/cuSOLVER, in which regime,
+and why. `MAP_LEDGER.md` tracks 34 mappings assessed (most losses); the ones
+that shipped are **SSJ** (a globally convergent symmetric eigensolver), **IPT**
+(a one-gemm-per-iteration fixed point that beats LAPACK near-diagonal),
+**normal/general** extensions of IPT, and **SDC** (spectral divide and
+conquer for the dense non-normal case). Start with **SSJ**: full symmetric /
+Hermitian eigendecomposition by applying *every* classical Jacobi rotation
+angle at once through a single linearized step, followed by reprojection onto
+the orthogonal manifold. Parameter-free — no pivoting, no shifts, no
+deflation or degeneracy-detection logic; matrix multiplication and an
+elementwise arctangent are the whole map.
 
 ```
 X ← I
@@ -21,7 +27,7 @@ The map is self-stabilizing through two automatic saturations: the arctan
 bounds each pair angle by π/4, and the reprojection of I + K rotates each
 K-invariant plane by arctan(σ) rather than σ, saturating the *composed* step.
 See [ALGORITHM.md](ALGORITHM.md) for the full specification and
-[RESULTS.md](RESULTS.md) for the original (Julia) measurements this
+[RESULTS_JULIA.md](RESULTS_JULIA.md) for the original (Julia) measurements this
 implementation reproduces. Our measurements, including two refinements found
 during reimplementation and several confirmed negative results, are in
 [BENCHMARKS.md](BENCHMARKS.md).
@@ -177,9 +183,13 @@ unitary retraction).
 
 **GPU:** pass a CuPy array and the whole iteration runs on the device — the
 implementation is backend-agnostic between NumPy and CuPy. `method="gemm"` is
-the natural GPU choice (matmuls and elementwise maps only). `bench_gpu.py`
-measures SSJ against cuSOLVER's `syevd` on your GPU; see BENCHMARKS.md for
-what to expect and why the CPU verdict may reverse there.
+the natural GPU choice (matmuls and elementwise maps only). Measured on a
+Tesla T4, `bench_gpu.py`'s founding thesis (that `syevd`'s cost in
+gemm-equivalents rises on GPU and opens room for an all-gemm method) **does
+not hold**: cuSOLVER is *more* gemm-efficient there than on CPU, not less
+(OPTIMIZATION_LOG.md #33). SDC fares better on the nonsymmetric side — it beats
+`cupy.linalg.eig` 1.04–1.25× at n ≤ 512 and loses 0.66–0.80× at n ≥ 1000
+(OPTIMIZATION_LOG.md #36, #42); see GENERAL.md and BENCHMARKS.md for both results.
 
 ### Methods and accelerations
 
@@ -205,7 +215,7 @@ tried — the map tolerates no memory and no extra aggressiveness.
 ## Repository layout
 
 - `src/ssj/core.py` — the solver (~200 lines of NumPy)
-- `validate.py` — reproduces the convergence battery and scaling table from RESULTS.md
+- `validate.py` — reproduces the convergence battery and scaling table from RESULTS_JULIA.md
 - `experiments.py` — mechanism experiments: trajectory, monotonicity, and controlled divergence of the variants that remove a saturation
 - `tests/test_ssj.py` — correctness tests (run with `pytest` or directly)
 - `src/ssj/ipt.py` — IPT and the SSJ->IPT hybrid (symmetric and general)
@@ -224,10 +234,10 @@ tried — the map tolerates no memory and no extra aggressiveness.
 - `experiments_secular.py` — a scalar map: eigenvalues as roots of a rational function, exact at any coupling, O(n^2)
 - `experiments_inertia.py` — inertia-certified Laguerre on the log-det jet: loses as an eigensolver, wins 2-14x on certified window counting (banded only)
 - `MAP_LEDGER.md` — closed record of 34 mappings assessed, with verdicts and why the hunt ended
-- `SSJ_LOG.md` — the SSJ improvement track: baseline, load-bearing mechanism, dead ends, open targets
+- `OPTIMIZATION_LOG.md` — improving the maps this repo already ships: SSJ's baseline and mechanism, then IPT/purification/SDC refinement, C and GPU work, dead ends, open targets
 - `ALGORITHM.md` — algorithm specification + implementation notes
 - `GENERAL.md` — the general (nonsymmetric) problem: one win, three failures
-- `RESULTS.md` — original measured results (Julia reference implementation)
+- `RESULTS_JULIA.md` — original measured results (Julia reference implementation)
 - `BENCHMARKS.md` — measurements of this implementation
 
 ## Requirements
@@ -243,7 +253,7 @@ niches are hardware where an eigensolve costs many gemm-equivalents and the
 `"gemm"` variant's pure-multiplication diet applies, and robustness — a
 three-line, parameter-free method with an empirically global basin and native
 degeneracy handling. No convergence proof is known; see the "Not established"
-section of RESULTS.md.
+section of RESULTS_JULIA.md.
 
 **IPT** is the part that beats LAPACK, but only inside its basin
 (ρ ≲ 0.1), which requires well-separated eigenvalues and not merely small

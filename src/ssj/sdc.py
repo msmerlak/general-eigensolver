@@ -6,7 +6,7 @@ N=1000, with one gemm as the unit:
 
     gemm 1.00 | inverse 3.90 | QR 8.45 | pivoted QR 11.04 | dgeev 82.7
 
-(That table was RE-MEASURED in SSJ_LOG #41 and the campaign's previous one --
+(That table was RE-MEASURED in OPTIMIZATION_LOG #41 and the campaign's previous one --
 inverse 5.35, QR 7.74, dgeev 93.9 -- was stale. The inverse is 27% cheaper
 relative to gemm than every cost model here assumed, which is why two
 inverse-for-gemm trades that looked like 13% wins measured as noise.)
@@ -47,7 +47,7 @@ eigenvalues on the splitting line) and Newton-Schulz takes over once inside its
 region, exactly as QR hands off to Newton-Schulz in ssj.core. Each avoided
 inverse saves 3.90 gemm-equivalents and costs 2 -- a thinner margin than the
 5.35 this module used to quote, and thin enough that two separate
-inverse-for-gemm trades measured as noise (SSJ_LOG #41).
+inverse-for-gemm trades measured as noise (OPTIMIZATION_LOG #41).
 """
 from __future__ import annotations
 
@@ -61,7 +61,7 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
     """Matrix sign function by scaled Newton with a Newton-Schulz endgame.
 
     Returns (S, iters). `count` optionally accumulates a cost model in
-    gemm-equivalents (inverse = 3.90, gemm = 1.0, re-measured in SSJ_LOG #41)
+    gemm-equivalents (inverse = 3.90, gemm = 1.0, re-measured in OPTIMIZATION_LOG #41)
     so the benchmark can report where the time goes.
 
     Requires A to have no eigenvalues on the imaginary axis; the caller
@@ -78,7 +78,7 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
         A fixed threshold on dev tests the wrong norm and breaks on spectra
         whose RMS deviation sits far below the operator norm: at dev < 0.9 a
         symmetric n=400 matrix enters NS outside its convergence region and
-        never converges (SSJ_LOG #31).
+        never converges (OPTIMIZATION_LOG #31).
     stagnation_tol : accept a stagnated iterate whose dev has fallen below
         this. `tol` is absolute, but the accuracy the iteration can REACH is
         set by cond(V) and is 2.5e-09 by cond(V) = 1e3 -- so an absolute 1e-12
@@ -119,7 +119,7 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
     # gate opens, because the NS step consumes it and the handoff wants the
     # exact value rather than the proxy. `since_check` forces a real test every
     # 8 iterations so a pathological Delta sequence cannot ride to max_iter
-    # without ever looking. (SSJ_LOG #30.)
+    # without ever looking. (OPTIMIZATION_LOG #30.)
     delta_prev = np.inf
     since_check = 0
     # ns_frob bounds ||I - X^2||_F; the loop carries dev = ||.||_F/sqrt(n).
@@ -137,7 +137,7 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
             if dev < tol:
                 return X, it
             if dev < ns_switch:
-                # STAGNATION IS SUCCESS, NOT FAILURE (SSJ_LOG #43). `tol` is
+                # STAGNATION IS SUCCESS, NOT FAILURE (OPTIMIZATION_LOG #43). `tol` is
                 # absolute, but the accuracy the iteration can REACH is set by
                 # the conditioning of A's eigenvector basis: the floor measured
                 # on planted spectra runs 6e-13 at cond(V)=1, 1.2e-12 at 1e2,
@@ -196,7 +196,7 @@ def matrix_sign(A, tol=1e-12, max_iter=60, ns_frob=1.0, stagnation_tol=1e-6,
     # last allowed iteration, so a non-converged S propagated silently -- and
     # it does happen: a near-symmetric n=800 matrix exits here with
     # ||S^2 - I||/sqrt(n) = 3.4e-01 and a spectral count wrong by three
-    # (SSJ_LOG #30). `sdc_eigvals` already catches LinAlgError and retries
+    # (OPTIMIZATION_LOG #30). `sdc_eigvals` already catches LinAlgError and retries
     # with a different shift, which is exactly the right response, so raising
     # routes this into the existing recovery path instead of downstream.
     raise np.linalg.LinAlgError(
@@ -224,7 +224,7 @@ def _inv_and_logdet(X):
     """Inverse and log|det|, both through NUMPY's LAPACK.
 
     THIS USED TO CALL scipy.linalg.lu_factor / lu_solve, AND THAT WAS THE
-    SINGLE LARGEST COST IN THE MODULE (SSJ_LOG #41). numpy and scipy ship
+    SINGLE LARGEST COST IN THE MODULE (OPTIMIZATION_LOG #41). numpy and scipy ship
     SEPARATE OpenBLAS shared objects, each with its own thread pool. On a
     4-core box, alternating numpy gemms with scipy factorizations every
     iteration keeps both pools hot and they fight: measured 3.48x at n=512 and
@@ -270,14 +270,14 @@ def _split(A, shift, tol=1e-12, count=None, gate=1e-11):
 
     # Orthonormal basis for range(P) by a RANDOMIZED RANGE-FINDER:
     # QR([P G1, (I-P) G2]) with ONE unpivoted QR. This replaced
-    # scipy.linalg.qr(pivoting=True) for two measured reasons (SSJ_LOG #41):
+    # scipy.linalg.qr(pivoting=True) for two measured reasons (OPTIMIZATION_LOG #41):
     # the pivoted QR ran at 6.0% of gemm rate -- 11.04 gemm-equivalents, the
     # worst-performing kernel in the whole method, worse than dgeev itself --
     # and it was a scipy call inside a numpy gemm loop, paying the separate-
     # OpenBLAS penalty documented at _inv_and_logdet.
     #
     # Column ORDER is load-bearing: the first r columns must come from P and
-    # the rest from I - P. SSJ_LOG #24 records building the basis from a
+    # the rest from I - P. OPTIMIZATION_LOG #24 records building the basis from a
     # pivoted QR of [P, I-P] instead, whose column reordering destroys the
     # range separation and reported a bogus ||A21||/||A|| = 2.6e-01 on a
     # symmetric matrix. P is idempotent to `tol`, so this split is exact.
@@ -336,7 +336,7 @@ def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
         slower on Ginibre n=400 -- 21.1x dgeev against 5.3x -- and no more
         accurate. Each level's split costs a full-size sign iteration while a
         dense solve of the block is milliseconds, so deep recursion pays
-        splits to avoid work that was never expensive (SSJ_LOG #17, #25).
+        splits to avoid work that was never expensive (OPTIMIZATION_LOG #17, #25).
 
         From above: n//2 is too SMALL, which is the non-obvious half. The
         centred split returns r = trace(P), which lands near n/2 but
@@ -344,7 +344,7 @@ def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
         and triggers a whole second sign iteration -- and sign is ~2/3 of the
         run. Measured on Ginibre: 412 ms -> 207 ms at n=200 and 1315 ms ->
         748 ms at n=400 moving the leaf from 0.5n to 0.6n, accuracy
-        unchanged at 4.4e-14 / 5.8e-14 (SSJ_LOG #28). The C port shows the
+        unchanged at 4.4e-14 / 5.8e-14 (OPTIMIZATION_LOG #28). The C port shows the
         same effect at 1.10x-1.16x, and it is flat from 0.55n to 0.9n, so the
         constant is not delicate -- what matters is being strictly above n/2
         while staying well below n, so a genuinely LOPSIDED split still
@@ -386,7 +386,7 @@ def sdc_eigvals(A, tol=1e-12, min_block=None, max_depth=64, count=None,
         if resid > gate:
             # The gate WAS 1e-6, which never fired: measured headroom against
             # what the split actually achieves ran 25892x at n=1024 and 17
-            # million x at n=256 (SSJ_LOG #39). A genuinely bad split -- an
+            # million x at n=256 (OPTIMIZATION_LOG #39). A genuinely bad split -- an
             # eigenvalue 1.83e-04 from the splitting line, where the sign
             # function is ill-conditioned -- sailed through at ||A21|| =
             # 3.86e-11 while other shifts on the same matrix reached 1.6e-13.

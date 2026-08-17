@@ -139,7 +139,7 @@ def test_purify_eigh_mixed_precision():
     """The fp32 split route: SP2 at sgemm rate, accuracy recovered by two
     consult-A polish steps with NS re-orthonormalization between them
     (each polish is first-order and non-orthogonal, so without the re-orth
-    the second step floors at the first's err^2 -- SSJ_LOG #19)."""
+    the second step floors at the first's err^2 -- OPTIMIZATION_LOG #19)."""
     import numpy as np
     from ssj import purify_eigh
 

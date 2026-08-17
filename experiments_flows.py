@@ -29,7 +29,7 @@ Three things follow that are not true of anything else here:
   * no denominators at all, so exact degeneracy is not a special case;
   * no near-diagonality assumption -- N is chosen, not read off A;
   * Brockett (1991) proves convergence to a diagonal matrix for generic N,
-    where RESULTS.md says plainly that no convergence proof is known for SSJ.
+    where RESULTS_JULIA.md says plainly that no convergence proof is known for SSJ.
 
 Also included, as an even more different mechanism (no orthogonal conjugation
 at all): the Cholesky-LR flow A <- L^T L where A = L L^T, and the QR flow

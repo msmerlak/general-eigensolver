@@ -1,6 +1,6 @@
 /* purify_eigh in C: recursive purification bisection + refinement ladder.
  *
- * A compiled port of ssj.purify.purify_eigh (SSJ_LOG attempts #16-22),
+ * A compiled port of ssj.purify.purify_eigh (OPTIMIZATION_LOG attempts #16-22),
  * written to test that log's central structural claim (#13): that the
  * algorithm costs ~2-3x LAPACK in FLOP units and the rest of its measured
  * 4-5x wall gap is NumPy substrate -- temporaries, unfused elementwise
@@ -230,7 +230,7 @@ static void ipt_polish(const double *A, bi n, bi lda, double *w, double *V,
 
 /* One Newton-Schulz step: V <- V(1.5 I - 0.5 V^T V). dsyrk gives the Gram at
  * half a gemm's flops. Clears the O(err^2) orthogonality defect the polish
- * leaves; without it the next polish step floors (SSJ_LOG #19). */
+ * leaves; without it the next polish step floors (OPTIMIZATION_LOG #19). */
 static void ns_reorth(bi n, double *V, double *G, double *Vn) {
     const double one = 1.0, zero = 0.0;
     scipy_dsyrk_64_("L", "T", &n, &n, &one, V, &n, &zero, G, &n);
@@ -374,7 +374,7 @@ static void purify_rec(const double *A, bi n, bi lda, bi leaf, double *w,
     ws_free(&sub);
 
     /* boundary audit: a split THROUGH a tight cluster leaves a fragment in
-     * each block and no polish can reunite them (SSJ_LOG #21) */
+     * each block and no polish can reunite them (OPTIMIZATION_LOG #21) */
     double hi1 = w1[r - 1], lo2 = w2[0];
     double sc = fabs(hi1) > fabs(lo2) ? fabs(hi1) : fabs(lo2);
     if (sc < 1e-300) sc = 1e-300;

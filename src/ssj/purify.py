@@ -268,7 +268,7 @@ def _ipt_polish(A, w, V):
 def refine_eigh(A, w, V, pairs=2):
     """Upgrade ANY approximate eigenbasis of Hermitian A to fp64 accuracy.
 
-    The refinement ladder (SSJ_LOG #19-20): alternate one consult-A IPT step
+    The refinement ladder (OPTIMIZATION_LOG #19-20): alternate one consult-A IPT step
     (3 gemms -- fixes the residual, first-order and non-orthogonal) with one
     Newton-Schulz step (2 gemms -- clears the O(err^2) orthogonality defect
     the polish leaves, which would otherwise floor the next step). Each pair
@@ -300,7 +300,7 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
                 precision="full"):
     """Full symmetric eigendecomposition by recursive purification bisection.
 
-    The OTHER pure-gemm family (SSJ_LOG #16-17): iterate on the MATRIX, not a
+    The OTHER pure-gemm family (OPTIMIZATION_LOG #16-17): iterate on the MATRIX, not a
     vector basis. Each level builds the spectral projector below mu = trace/n
     by McWeeny purification (two gemms per iteration, quadratic, globally
     convergent -- ~30 iterations regardless of size), extracts the split
@@ -309,7 +309,7 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
     recurses. Leaves fall to LAPACK `eigh` -- the same reliance the SSJ block
     schedule has on batched `eigh`.
 
-    Measured (SSJ_LOG #17-18, clean box): 6.2x LAPACK at n=400 and 8.3x at
+    Measured (OPTIMIZATION_LOG #17-18, clean box): 6.2x LAPACK at n=400 and 8.3x at
     n=800 with the SP2 projector and the final IPT polish, against the
     composed SSJ solver's 12.9x / 15.4x -- the fastest full solver in this
     repository on CPU, at full accuracy (residual ~3e-15), and structurally
@@ -395,7 +395,7 @@ def purify_eigh(A, leaf=None, tol=1e-12, rng=None, polish=True,
         # Newton-Schulz re-orthonormalization between them -- the polish is a
         # first-order NON-ORTHOGONAL correction, so each step leaves an
         # O(err^2) orthogonality defect that would floor the next step (the
-        # congruence lesson of SSJ_LOG #15/#19). One NS step (2 gemms) takes
+        # congruence lesson of OPTIMIZATION_LOG #15/#19). One NS step (2 gemms) takes
         # a 1e-8 defect to 1e-16 and keeps the refinement quadratic:
         # 2e-4 -> 3e-8 -> 2e-12 -> 2e-15 measured per step at n=800.
         pairs = 2 if mixed else 1

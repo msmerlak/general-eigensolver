@@ -17,7 +17,7 @@ eigenvector component:
 The whole update is ONE gemm (W V) plus elementwise work -- the cheapest
 useful iteration in this repository by a factor of ~5-10 against an SSJ sweep.
 The price is a bounded basin: the map contracts only while the coupling is
-small against the level spacing, and it diverges outside that (RESULTS.md
+small against the level spacing, and it diverges outside that (RESULTS_JULIA.md
 records Newton-type linearized-angle iterations diverging at ~0.85x the level
 spacing, which is this same boundary).
 
@@ -697,7 +697,7 @@ def ipt_rate_columns(A, cols):
         return rates
 
     # GPU path keeps the loop: the vectorized form above is untested on cupy
-    # and this campaign does not ship unmeasured kernels (SSJ_LOG #7).
+    # and this campaign does not ship unmeasured kernels (OPTIMIZATION_LOG #7).
     rates = xp.empty(len(cols))
     for j, c in enumerate(cols):
         gap = xp.abs(d[c] - d)

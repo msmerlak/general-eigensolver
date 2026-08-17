@@ -2,7 +2,7 @@
 #
 # It links the SAME OpenBLAS that NumPy uses (scipy_openblas64, 64-bit int,
 # scipy_*_64_ symbol prefix). That is deliberate: benchmarking the C solver
-# against a differently-built BLAS would repeat SSJ_LOG #13's confound, where
+# against a differently-built BLAS would repeat OPTIMIZATION_LOG #13's confound, where
 # SciPy's BLAS wrapper measured 2.6x slower than NumPy's `@` on the same box
 # and nearly produced a false "syrk is useless" verdict.
 #
